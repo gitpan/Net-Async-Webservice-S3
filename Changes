@@ -1,4 +1,10 @@
 Revision history for Net-Async-Webservice-S3
 
+0.02    CHANGES:
+         * Initial implementation of multipart upload
+         * Changed gen_value callback API to pass in position/length
+         * Changed put_object future return value to yield ETag directly
+         * Declare that we need NaHTTP at least 0.19
+
 0.01    First version, released on an unsuspecting world.
 

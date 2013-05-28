@@ -42,6 +42,11 @@ PARAMETERS
             efficient as fewer roundtrips will be required per method call.
             Defaults to 100.
 
+    multipart_chunk_size => INT
+            Optional. Size in bytes to break content for using multipart
+            upload. If an object key's size is no larger than this value,
+            multipart upload will not be used. Defaults to 100 MiB.
+
 METHODS
   $f = $s3->list_bucket( %args )
     Requests a list of the keys in a bucket, optionally within some prefix.
@@ -132,20 +137,29 @@ METHODS
     gen_value => CODE
             Alternative to `value' in the case of larger values. Called
             repeatedly to generate successive chunks of the value. Each
-            invocation should return either a string of bytes, or `undef' to
-            indicate completion.
+            invocation will be passed a byte position and length, and should
+            return a string of bytes.
+
+             $bytes = $gen_value->( $pos, $length )
+
+            This callback will not be invoked on a range outside of the
+            length given by the `value_length' parameter. It may return a
+            shorter byte chunk than requested.
 
     value_length => INT
             If `gen_value' is given instead of `value', this argument must
             be provided and gives the length of the data that `gen_value'
             will eventually generate.
 
-    The Future will return a single string containing the MD5 sum of the
-    newly-set key, as a 32-character hexadecimal string.
+    The Future will return a single string containing the S3 ETag of the
+    newly-set key. For single-part uploads this will be the MD5 sum in hex,
+    surrounded by quote marks. For multi-part uploads this is a string in a
+    different form, though details of its generation are not specified by
+    S3.
 
-     ( $md5_hex ) = $f->get
+     ( $etag ) = $f->get
 
-    The returned MD5 sum from S3 will be checked against an
+    The returned MD5 sum from S3 during upload will be checked against an
     internally-generated MD5 sum of the content that was sent, and an error
     result will be returned if these do not match.
 

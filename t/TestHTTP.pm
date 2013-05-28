@@ -33,6 +33,8 @@ sub do_request
       }
    }
 
+   delete $args{expect_continue};
+
    die "TODO: more args: " . join( ", ", keys %args ) if keys %args;
 
    return $pending_response = Future->new;

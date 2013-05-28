@@ -11,6 +11,7 @@ my $build = Module::Build->new(
       'HTTP::Date' => 0,
       'HTTP::Request' => 0,
       'MIME::Base64' => 0,
+      'Net::Async::HTTP' => '0.19',
       'URI::Escape' => 0,
       'XML::LibXML' => 0,
    },

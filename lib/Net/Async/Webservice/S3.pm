@@ -9,12 +9,12 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 use Carp;
 
 use Digest::HMAC_SHA1;
-use Digest::MD5;
+use Digest::MD5 qw( md5 );
 use Future::Utils qw( repeat );
 use HTTP::Date qw( time2str );
 use HTTP::Request;
@@ -22,6 +22,8 @@ use MIME::Base64 qw( encode_base64 );
 use URI::Escape qw( uri_escape_utf8 );
 use XML::LibXML;
 use XML::LibXML::XPathContext;
+
+use constant READ_SIZE => 64*1024; # 64 KiB
 
 my $libxml = XML::LibXML->new;
 
@@ -49,6 +51,7 @@ sub _init
 
    $args->{http} ||= do {
       require Net::Async::HTTP;
+      Net::Async::HTTP->VERSION( '0.19' ); # Futures
       my $http = Net::Async::HTTP->new;
       $self->add_child( $http );
       $http;
@@ -56,6 +59,10 @@ sub _init
 
    $args->{max_retries} //= 3;
    $args->{list_max_keys} //= 100;
+
+   # S3 docs suggest > 100MB should use multipart. They don't actually
+   # document what size of chunks to use, but we'll use that again.
+   $args->{multipart_chunk_size} //= 100*1024*1024;
 
    return $self->SUPER::_init( @_ );
 }
@@ -96,6 +103,12 @@ Optional. Maximum number of keys at a time to request from S3 for the
 C<list_bucket> method. Larger values may be more efficient as fewer roundtrips
 will be required per method call. Defaults to 100.
 
+=item multipart_chunk_size => INT
+
+Optional. Size in bytes to break content for using multipart upload. If an object
+key's size is no larger than this value, multipart upload will not be used.
+Defaults to 100 MiB.
+
 =back
 
 =cut
@@ -105,7 +118,7 @@ sub configure
    my $self = shift;
    my %args = @_;
 
-   foreach (qw( http access_key secret_key max_retries list_max_keys )) {
+   foreach (qw( http access_key secret_key max_retries list_max_keys multipart_chunk_size )) {
       defined $args{$_} and $self->{$_} = delete $args{$_};
    }
 
@@ -147,9 +160,11 @@ sub _make_request
 
    my @headers = (
       Date => time2str( time ),
+      %{ $args{headers} || {} },
    );
 
    my $request = HTTP::Request->new( $method, $uri, \@headers, $args{content} );
+   $request->content_length( length $args{content} );
 
    $self->_gen_auth_header( $request, $bucket, $path );
 
@@ -165,6 +180,20 @@ sub _gen_auth_header
    #   http://docs.aws.amazon.com/AmazonS3/latest/dev/RESTAuthentication.html#ConstructingTheAuthenticationHeader
 
    my $canon_resource = "/$bucket/$path";
+   if( length $request->uri->query ) {
+      my %params = $request->uri->query_form;
+      my %params_to_sign;
+      foreach (qw( partNumber uploadId )) {
+         $params_to_sign{$_} = $params{$_} if exists $params{$_};
+      }
+
+      my @params_to_sign;
+      foreach ( sort keys %params_to_sign ) {
+         push @params_to_sign, defined $params{$_} ? "$_=$params{$_}" : $_;
+      }
+
+      $canon_resource .= "?" . join( "&", @params_to_sign ) if @params_to_sign;
+   }
 
    my $buffer = join( "\n",
       $request->method,
@@ -180,9 +209,7 @@ sub _gen_auth_header
    $hmac->add( $buffer );
 
    my $access_key = $self->{access_key};
-   my $authkey = encode_base64( $hmac->digest );
-   # Trim the trailing \n
-   $authkey =~ s/\n$//;
+   my $authkey = encode_base64( $hmac->digest, "" );
 
    $request->header( Authorization => "AWS $access_key:$authkey" );
 }
@@ -468,8 +495,14 @@ Optional. If provided, gives a byte string as the new value for the key
 =item gen_value => CODE
 
 Alternative to C<value> in the case of larger values. Called repeatedly to
-generate successive chunks of the value. Each invocation should return either
-a string of bytes, or C<undef> to indicate completion.
+generate successive chunks of the value. Each invocation will be passed a byte
+position and length, and should return a string of bytes.
+
+ $bytes = $gen_value->( $pos, $length )
+
+This callback will not be invoked on a range outside of the length given by
+the C<value_length> parameter. It may return a shorter byte chunk than
+requested.
 
 =item value_length => INT
 
@@ -478,14 +511,16 @@ and gives the length of the data that C<gen_value> will eventually generate.
 
 =back
 
-The Future will return a single string containing the MD5 sum of the newly-set
-key, as a 32-character hexadecimal string.
+The Future will return a single string containing the S3 ETag of the newly-set
+key. For single-part uploads this will be the MD5 sum in hex, surrounded by
+quote marks. For multi-part uploads this is a string in a different form,
+though details of its generation are not specified by S3.
 
- ( $md5_hex ) = $f->get
+ ( $etag ) = $f->get
 
-The returned MD5 sum from S3 will be checked against an internally-generated
-MD5 sum of the content that was sent, and an error result will be returned if
-these do not match.
+The returned MD5 sum from S3 during upload will be checked against an
+internally-generated MD5 sum of the content that was sent, and an error result
+will be returned if these do not match.
 
 =cut
 
@@ -494,16 +529,12 @@ sub _put_object
    my $self = shift;
    my %args = @_;
 
-   my $content_length = delete $args{value_length} // length $args{value};
-   defined $content_length or croak "Require value_length or value";
-
-   my $gen_value = delete $args{gen_value};
-   my $value     = delete $args{value};
+   my $content_length = $args{content_length};
+   my $gen_content    = $args{gen_content};
 
    my $request = $self->_make_request(
+      %args,
       method  => "PUT",
-      bucket  => $args{bucket},
-      path    => $args{key},
       content => "", # Doesn't matter, it'll be ignored
    );
 
@@ -512,13 +543,23 @@ sub _put_object
 
    my $md5ctx = Digest::MD5->new;
 
+   my $pos = $args{start_pos} // 0;
+   my $end = $pos + $content_length;
+
    $self->_do_request( $request,
+      expect_continue => 1,
       request_body => sub {
-         return undef if !$gen_value and !length $value;
-         my $chunk = $gen_value ? $gen_value->() : substr( $value, 0, 64*1024, "" );
-         return undef if !defined $chunk;
+         return undef if $pos >= $end;
+
+         my $len = $end - $pos;
+         $len = READ_SIZE if $len > READ_SIZE;
+
+         my $chunk = $gen_content->( $pos, $len );
+         return undef unless defined $chunk; # TODO: This is surely an error
 
          $md5ctx->add( $chunk );
+         $pos += length $chunk;
+
          return $chunk;
       },
    )->then( sub {
@@ -539,14 +580,150 @@ sub _put_object
          return Future->new->die( "Returned MD5 hash ($got_md5) did not match expected ($expect_md5)", $resp );
       }
 
-      return Future->new->done( $got_md5 );
+      return Future->new->done( $etag );
+   });
+}
+
+sub _initiate_multipart_upload
+{
+   my $self = shift;
+   my %args = @_;
+
+   my $req = $self->_make_request(
+      method  => "POST",
+      bucket  => $args{bucket},
+      path    => "$args{key}?uploads",
+      content => "",
+   );
+
+   $self->_do_request_xpc( $req )->then( sub {
+      my $xpc = shift;
+
+      my $id = $xpc->findvalue( ".//s3:InitiateMultipartUploadResult/s3:UploadId" );
+      return Future->new->done( $id );
+   });
+}
+
+sub _complete_multipart_upload
+{
+   my $self = shift;
+   my %args = @_;
+
+   my $req = $self->_make_request(
+      method       => "POST",
+      bucket       => $args{bucket},
+      path         => $args{key},
+      content      => $args{content},
+      query_params => {
+         uploadId     => $args{id},
+      },
+      headers      => {
+         "Content-Type" => "application/xml",
+         "Content-MD5"  => encode_base64( md5( $args{content} ), "" ),
+      },
+   );
+
+   $self->_do_request_xpc( $req )->then( sub {
+      my $xpc = shift;
+
+      my $etag = $xpc->findvalue( ".//s3:CompleteMultipartUploadResult/s3:ETag" );
+      return Future->new->done( $etag );
    });
 }
 
 sub put_object
 {
    my $self = shift;
-   $self->_retry( "_put_object", @_ );
+   my %args = @_;
+
+   my $content_length = delete $args{value_length} // length $args{value};
+   defined $content_length or croak "Require value_length or value";
+
+   my $gen_content;
+   if( my $gen_value = delete $args{gen_value} ) {
+      $gen_content = $gen_value;
+   }
+   elsif( my $value  = delete $args{value} ) {
+      $gen_content = sub {
+         return substr( $value, $_[0], $_[1] );
+      };
+   }
+   else {
+      croak "Require gen_value or value";
+   }
+
+   my $chunk_size = $self->{multipart_chunk_size};
+
+   if( $content_length > $chunk_size * 10_000 ) {
+      croak "Cannot upload content in more than 10,000 parts - consider using a larger multipart_chunk_size";
+   }
+   elsif( $content_length <= $chunk_size ) {
+      $self->_retry( "_put_object",
+         bucket         => $args{bucket},
+         path           => $args{key},
+         content_length => $content_length,
+         gen_content    => $gen_content,
+      );
+   }
+   else {
+      my @etags;
+
+      $self->_retry( "_initiate_multipart_upload",
+         %args
+      )->then( sub {
+         my ( $id ) = @_;
+
+         my $part_num = 0;
+         repeat {
+            my ( $part_num, $start ) = @{$_[0]};
+            my $end = $start + $chunk_size;
+            $end = $content_length if $end > $content_length;
+
+            $self->_retry( "_put_object",
+               bucket         => $args{bucket},
+               path           => $args{key},
+               start_pos      => $start,
+               content_length => $end - $start,
+               gen_content    => $gen_content,
+               query_params   => {
+                  partNumber     => $part_num + 1, # 1-based
+                  uploadId       => $id,
+               },
+            )->on_done( sub {
+               my ( $etag ) = @_;
+               push @etags, [ $part_num + 1, $etag ];
+            })
+         } generate => sub {
+            my $start = $part_num * $chunk_size;
+            return if $start >= $content_length;
+            return [ $part_num++, $start ];
+         }, while => sub {
+            !$_[0]->failure;
+         }, otherwise => sub {
+            return Future->new->done( $id, @etags );
+         }, return => $self->loop->new_future;
+      })->then( sub {
+         my ( $id, @etags ) = @_;
+
+         my $doc = XML::LibXML::Document->new( "1.0", "UTF-8" );
+         $doc->addChild( my $root = $doc->createElement( "CompleteMultipartUpload" ) );
+
+         #add content
+         foreach ( @etags ) {
+            my ( $part_num, $etag ) = @$_;
+
+            $root->addChild( my $part = $doc->createElement('Part') );
+            $part->appendTextChild( PartNumber => $part_num );
+            $part->appendTextChild( ETag       => $etag );
+         }
+
+         $self->_retry( "_complete_multipart_upload",
+            %args,
+            id      => $id,
+            content => $doc->toString,
+         );
+      });
+   }
 }
 
 =head2 $f = $s3->delete_object( %args )
