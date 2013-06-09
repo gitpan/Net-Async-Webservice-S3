@@ -78,7 +78,12 @@ sub respond_done
 {
    shift;
 
-   $pending_response->done( $pending_on_chunk->() );
+   my $f = $pending_response;
+
+   undef $pending_request;
+   undef $pending_response;
+
+   $f->done( $pending_on_chunk->() );
 }
 
 0x55AA;

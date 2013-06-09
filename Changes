@@ -1,5 +1,10 @@
 Revision history for Net-Async-Webservice-S3
 
+0.03    CHANGES:
+         * Allow storing an optional bucket name and key name prefix
+         * List in batches of 1000 by default, rather than 100
+         * Declare explicit dependency on Future 0.13
+
 0.02    CHANGES:
          * Initial implementation of multipart upload
          * Changed gen_value callback API to pass in position/length

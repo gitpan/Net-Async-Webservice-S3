@@ -82,4 +82,34 @@ EOF
    wait_for { $f->is_ready };
 }
 
+# Get with implied bucket and prefix
+{
+   $s3->configure(
+      bucket => "bucket",
+      prefix => "subdir/",
+   );
+
+   my $f = $s3->get_object(
+      key => "1",
+   );
+
+   my $req;
+   wait_for { $req = $http->pending_request };
+
+   is( $req->method,         "GET",                     'Request method' );
+   is( $req->uri->authority, "bucket.s3.amazonaws.com", 'Request URI authority' );
+   is( $req->uri->path,      "/subdir/1",               'Request URI path' );
+
+   $http->respond(
+      HTTP::Response->new( 200, "OK", [
+         Content_Type => "text/plain",
+      ], <<'EOF' )
+More content
+EOF
+   );
+
+   wait_for { $f->is_ready };
+   $f->get;
+}
+
 done_testing;

@@ -48,7 +48,7 @@ isa_ok( $s3, "Net::Async::Webservice::S3", '$s3' );
    wait_for { $req = $http->pending_request };
 
    is( $req->method, "GET", '$req->method' );
-   is( $req->uri, "http://bucket.s3.amazonaws.com/?delimiter=%2F&max-keys=100&prefix=", '$req->uri' );
+   is( $req->uri, "http://bucket.s3.amazonaws.com/?delimiter=%2F&max-keys=1000&prefix=", '$req->uri' );
 
    # Assert the date header, as auth depends on it
    is( $req->header( "Date" ), "Sun, 26 May 2013 17:06:17 GMT", '$req->header("Date")' );

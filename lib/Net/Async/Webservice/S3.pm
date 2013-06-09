@@ -9,12 +9,13 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 use Carp;
 
 use Digest::HMAC_SHA1;
 use Digest::MD5 qw( md5 );
+use Future 0.13; # ->then
 use Future::Utils qw( repeat );
 use HTTP::Date qw( time2str );
 use HTTP::Request;
@@ -58,7 +59,7 @@ sub _init
    };
 
    $args->{max_retries} //= 3;
-   $args->{list_max_keys} //= 100;
+   $args->{list_max_keys} //= 1000;
 
    # S3 docs suggest > 100MB should use multipart. They don't actually
    # document what size of chunks to use, but we'll use that again.
@@ -93,6 +94,19 @@ it gets added to the underlying L<IO::Async::Loop> instance, if required.
 The twenty-character Access Key ID and forty-character Secret Key to use for
 authenticating requests to S3.
 
+=item bucket => STRING
+
+Optional. If supplied, gives the default bucket name to use, at which point it
+is optional to supply to the remaining methods.
+
+=item prefix => STRING
+
+Optional. If supplied, this prefix string is prepended to any key names passed
+in methods, and stripped from the response from C<list_bucket>. It can be used
+to keep operations of the object contained within the named key space. If this
+string is supplied, don't forget that it should end with the path delimiter in
+use by the key naming scheme (for example C</>).
+
 =item max_retries => INT
 
 Optional. Maximum number of times to retry a failed operation. Defaults to 3.
@@ -101,7 +115,7 @@ Optional. Maximum number of times to retry a failed operation. Defaults to 3.
 
 Optional. Maximum number of keys at a time to request from S3 for the
 C<list_bucket> method. Larger values may be more efficient as fewer roundtrips
-will be required per method call. Defaults to 100.
+will be required per method call. Defaults to 1000.
 
 =item multipart_chunk_size => INT
 
@@ -118,7 +132,8 @@ sub configure
    my $self = shift;
    my %args = @_;
 
-   foreach (qw( http access_key secret_key max_retries list_max_keys multipart_chunk_size )) {
+   foreach (qw( http access_key secret_key bucket prefix max_retries list_max_keys
+                multipart_chunk_size )) {
       defined $args{$_} and $self->{$_} = delete $args{$_};
    }
 
@@ -143,8 +158,8 @@ sub _make_request
       push @params, $key . "=" . uri_escape_utf8( $value, "^A-Za-z0-9_-" );
    }
 
-   my $bucket = $args{bucket};
-   my $path   = $args{path};
+   my $bucket = $args{bucket} // $self->{bucket};
+   my $path   = $args{abs_path} // join "", grep { defined } $self->{prefix}, $args{path};
 
    my $uri;
    # TODO: https?
@@ -342,9 +357,9 @@ sub _list_bucket
       my $req = $self->_make_request(
          method       => "GET",
          bucket       => $args{bucket},
-         path         => "",
+         abs_path     => "",
          query_params => {
-            prefix       => $args{prefix},
+            prefix       => join( "", grep { defined } $self->{prefix}, $args{prefix} ),
             delimiter    => $args{delimiter},
             marker       => $marker,
             max_keys     => $self->{list_max_keys},
@@ -354,9 +369,14 @@ sub _list_bucket
       $self->_do_request_xpc( $req )->then( sub {
          my $xpc = shift;
 
+         my $last_key;
          foreach my $node ( $xpc->findnodes( ".//s3:Contents" ) ) {
+            my $key = $xpc->findvalue( ".//s3:Key", $node );
+            $last_key = $key;
+
+            $key =~ s/^\Q$self->{prefix}\E// if defined $self->{prefix};
             push @keys, {
-               key           => $xpc->findvalue( ".//s3:Key", $node ),
+               key           => $key,
                last_modified => $xpc->findvalue( ".//s3:LastModified", $node ),
                etag          => $xpc->findvalue( ".//s3:ETag", $node ),
                size          => $xpc->findvalue( ".//s3:Size", $node ),
@@ -365,11 +385,13 @@ sub _list_bucket
          }
 
          foreach my $node ( $xpc->findnodes( ".//s3:CommonPrefixes" ) ) {
-            push @prefixes, $xpc->findvalue( ".//s3:Prefix", $node );
+            my $key = $xpc->findvalue( ".//s3:Prefix", $node );
+
+            $key =~ s/^\Q$self->{prefix}\E// if defined $self->{prefix};
+            push @prefixes, $key;
          }
 
          if( $xpc->findvalue( ".//s3:IsTruncated" ) eq "true" ) {
-            my $last_key = $keys[-1]->{key};
             return Future->new->done( $last_key );
          }
          return Future->new->done;

@@ -8,6 +8,7 @@ my $build = Module::Build->new(
    requires => {
       'Digest::HMAC_SHA1' => 0,
       'Digest::MD5' => 0,
+      'Future' => '0.13',
       'HTTP::Date' => 0,
       'HTTP::Request' => 0,
       'MIME::Base64' => 0,

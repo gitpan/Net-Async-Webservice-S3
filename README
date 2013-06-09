@@ -32,6 +32,18 @@ PARAMETERS
             The twenty-character Access Key ID and forty-character Secret
             Key to use for authenticating requests to S3.
 
+    bucket => STRING
+            Optional. If supplied, gives the default bucket name to use, at
+            which point it is optional to supply to the remaining methods.
+
+    prefix => STRING
+            Optional. If supplied, this prefix string is prepended to any
+            key names passed in methods, and stripped from the response from
+            `list_bucket'. It can be used to keep operations of the object
+            contained within the named key space. If this string is
+            supplied, don't forget that it should end with the path
+            delimiter in use by the key naming scheme (for example `/').
+
     max_retries => INT
             Optional. Maximum number of times to retry a failed operation.
             Defaults to 3.
@@ -40,7 +52,7 @@ PARAMETERS
             Optional. Maximum number of keys at a time to request from S3
             for the `list_bucket' method. Larger values may be more
             efficient as fewer roundtrips will be required per method call.
-            Defaults to 100.
+            Defaults to 1000.
 
     multipart_chunk_size => INT
             Optional. Size in bytes to break content for using multipart
