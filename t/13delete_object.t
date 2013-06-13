@@ -32,7 +32,8 @@ $loop->add( $s3 );
    );
 
    my $req;
-   wait_for { $req = $http->pending_request };
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
 
    is( $req->method,         "DELETE",                  'Request method' );
    is( $req->uri->authority, "bucket.s3.amazonaws.com", 'Request URI authority' );

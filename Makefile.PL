@@ -10,6 +10,7 @@ WriteMakefile
                    'Future' => '0.13',
                    'HTTP::Date' => 0,
                    'HTTP::Request' => 0,
+                   'IO::Async::Stream' => '0.57',
                    'IO::Async::Test' => 0,
                    'MIME::Base64' => 0,
                    'Net::Async::HTTP' => '0.19',

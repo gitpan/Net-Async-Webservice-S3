@@ -54,10 +54,11 @@ PARAMETERS
             efficient as fewer roundtrips will be required per method call.
             Defaults to 1000.
 
-    multipart_chunk_size => INT
+    part_size => INT
             Optional. Size in bytes to break content for using multipart
             upload. If an object key's size is no larger than this value,
-            multipart upload will not be used. Defaults to 100 MiB.
+            multipart upload will not be used. Defaults to 100 MiB. (Used to
+            be called `multipart_chunk_size'.
 
 METHODS
   $f = $s3->list_bucket( %args )
@@ -146,7 +147,23 @@ METHODS
             Optional. If provided, gives a byte string as the new value for
             the key
 
+    gen_parts => CODE
+            Alternative to `value' in the case of larger values, and implies
+            the use of multipart upload. Called repeatedly to generate
+            successive parts of the upload. Each time it is called it should
+            yield two values; an integer giving the length of this part, and
+            a generator used to create it. The generator must be a code
+            reference of the same form as given in `gen_value' below. When
+            there are no more parts it should return an empty list.
+
+             ( $value_length, $gen_value ) = $gen_parts->()
+
+            The `$pos' parameter to `$gen_value' will begin at zero for each
+            part.
+
     gen_value => CODE
+            DEPRECATED. See instead `gen_parts'
+
             Alternative to `value' in the case of larger values. Called
             repeatedly to generate successive chunks of the value. Each
             invocation will be passed a byte position and length, and should
@@ -157,6 +174,11 @@ METHODS
             This callback will not be invoked on a range outside of the
             length given by the `value_length' parameter. It may return a
             shorter byte chunk than requested.
+
+            If it declines entirely to yield enough content (by returning
+            `undef') then the remainder of the declared content length will
+            be null-padded. If it returns too much content, it will be
+            truncated.
 
     value_length => INT
             If `gen_value' is given instead of `value', this argument must

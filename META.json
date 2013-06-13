@@ -27,6 +27,7 @@
             "Future" : "0.13",
             "HTTP::Date" : "0",
             "HTTP::Request" : "0",
+            "IO::Async::Stream" : "0.57",
             "MIME::Base64" : "0",
             "Net::Async::HTTP" : "0.19",
             "URI::Escape" : "0",
@@ -37,7 +38,7 @@
    "provides" : {
       "Net::Async::Webservice::S3" : {
          "file" : "lib/Net/Async/Webservice/S3.pm",
-         "version" : "0.03"
+         "version" : "0.04"
       }
    },
    "release_status" : "stable",
@@ -46,5 +47,5 @@
          "http://dev.perl.org/licenses/"
       ]
    },
-   "version" : "0.03"
+   "version" : "0.04"
 }

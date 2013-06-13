@@ -1,5 +1,10 @@
 Revision history for Net-Async-Webservice-S3
 
+0.04    CHANGES:
+         * New 'gen_parts' multipart generator to replace 'gen_value'
+         * Support generating parts from Futures
+         * Renamed 'multipart_chunk_size' to 'part_size'
+
 0.03    CHANGES:
          * Allow storing an optional bucket name and key name prefix
          * List in batches of 1000 by default, rather than 100

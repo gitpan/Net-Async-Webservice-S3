@@ -9,7 +9,7 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 use Carp;
 
@@ -20,6 +20,7 @@ use Future::Utils qw( repeat );
 use HTTP::Date qw( time2str );
 use HTTP::Request;
 use MIME::Base64 qw( encode_base64 );
+use Scalar::Util qw( blessed );
 use URI::Escape qw( uri_escape_utf8 );
 use XML::LibXML;
 use XML::LibXML::XPathContext;
@@ -62,8 +63,8 @@ sub _init
    $args->{list_max_keys} //= 1000;
 
    # S3 docs suggest > 100MB should use multipart. They don't actually
-   # document what size of chunks to use, but we'll use that again.
-   $args->{multipart_chunk_size} //= 100*1024*1024;
+   # document what size of parts to use, but we'll use that again.
+   $args->{part_size} //= $args->{multipart_chunk_size} // 100*1024*1024;
 
    return $self->SUPER::_init( @_ );
 }
@@ -117,11 +118,11 @@ Optional. Maximum number of keys at a time to request from S3 for the
 C<list_bucket> method. Larger values may be more efficient as fewer roundtrips
 will be required per method call. Defaults to 1000.
 
-=item multipart_chunk_size => INT
+=item part_size => INT
 
 Optional. Size in bytes to break content for using multipart upload. If an object
 key's size is no larger than this value, multipart upload will not be used.
-Defaults to 100 MiB.
+Defaults to 100 MiB. (Used to be called C<multipart_chunk_size>.
 
 =back
 
@@ -132,8 +133,11 @@ sub configure
    my $self = shift;
    my %args = @_;
 
+   # Legacy name
+   $args{part_size} = delete $args{multipart_chunk_size} if defined $args{multipart_chunk_size};
+
    foreach (qw( http access_key secret_key bucket prefix max_retries list_max_keys
-                multipart_chunk_size )) {
+                part_size )) {
       defined $args{$_} and $self->{$_} = delete $args{$_};
    }
 
@@ -514,7 +518,22 @@ The name of the key to put the value in
 
 Optional. If provided, gives a byte string as the new value for the key
 
+=item gen_parts => CODE
+
+Alternative to C<value> in the case of larger values, and implies the use of
+multipart upload. Called repeatedly to generate successive parts of the
+upload. Each time it is called it should yield two values; an integer giving
+the length of this part, and a generator used to create it. The generator must
+be a code reference of the same form as given in C<gen_value> below. When
+there are no more parts it should return an empty list.
+
+ ( $value_length, $gen_value ) = $gen_parts->()
+
+The C<$pos> parameter to C<$gen_value> will begin at zero for each part.
+
 =item gen_value => CODE
+
+DEPRECATED. See instead C<gen_parts>
 
 Alternative to C<value> in the case of larger values. Called repeatedly to
 generate successive chunks of the value. Each invocation will be passed a byte
@@ -525,6 +544,10 @@ position and length, and should return a string of bytes.
 This callback will not be invoked on a range outside of the length given by
 the C<value_length> parameter. It may return a shorter byte chunk than
 requested.
+
+If it declines entirely to yield enough content (by returning C<undef>) then
+the remainder of the declared content length will be null-padded. If it
+returns too much content, it will be truncated.
 
 =item value_length => INT
 
@@ -546,6 +569,51 @@ will be returned if these do not match.
 
 =cut
 
+sub _md5sum_wrap
+{
+   my ( $content, $md5ctx, $posref, $content_length ) = @_;
+
+   if( !defined $content ) {
+      $content = "\0" x ( $content_length - $$posref );
+
+      $md5ctx->add( $content );
+      $$posref += length $content;
+
+      return $content;
+   }
+   elsif( !ref $content ) {
+      my $len = $content_length - $$posref;
+      substr( $content, $len ) = "" if length $content > $len;
+
+      $md5ctx->add( $content );
+      $$posref += length $content;
+
+      return $content;
+   }
+   elsif( ref $content eq "CODE" ) {
+      return sub {
+         return undef if $$posref >= $content_length;
+
+         my $len = $content_length - $$posref;
+         $len = READ_SIZE if $len > READ_SIZE;
+
+         my $chunk = $content->( $$posref, $len );
+         return _md5sum_wrap( $chunk, $md5ctx, $posref, $content_length );
+      }
+   }
+   elsif( blessed $content and $content->isa( "Future" ) ) {
+      return $content->transform(
+         done => sub {
+            my ( $chunk ) = @_;
+            return _md5sum_wrap( $chunk, $md5ctx, $posref, $content_length );
+         },
+      );
+   }
+   else {
+      die "TODO: md5sum wrap ref $content";
+   }
+}
+
 sub _put_object
 {
    my $self = shift;
@@ -565,25 +633,11 @@ sub _put_object
 
    my $md5ctx = Digest::MD5->new;
 
-   my $pos = $args{start_pos} // 0;
-   my $end = $pos + $content_length;
+   my $pos = 0;
 
    $self->_do_request( $request,
       expect_continue => 1,
-      request_body => sub {
-         return undef if $pos >= $end;
-
-         my $len = $end - $pos;
-         $len = READ_SIZE if $len > READ_SIZE;
-
-         my $chunk = $gen_content->( $pos, $len );
-         return undef unless defined $chunk; # TODO: This is surely an error
-
-         $md5ctx->add( $chunk );
-         $pos += length $chunk;
-
-         return $chunk;
-      },
+      request_body => _md5sum_wrap( $gen_content, $md5ctx, \$pos, $content_length ),
    )->then( sub {
       my $resp = shift;
 
@@ -658,28 +712,64 @@ sub put_object
    my $self = shift;
    my %args = @_;
 
-   my $content_length = delete $args{value_length} // length $args{value};
-   defined $content_length or croak "Require value_length or value";
-
-   my $gen_content;
-   if( my $gen_value = delete $args{gen_value} ) {
-      $gen_content = $gen_value;
-   }
-   elsif( my $value  = delete $args{value} ) {
-      $gen_content = sub {
-         return substr( $value, $_[0], $_[1] );
-      };
+   my $use_multipart;
+   my $gen_parts;
+   if( $gen_parts = delete $args{gen_parts} ) {
+      $use_multipart = 1;
    }
    else {
-      croak "Require gen_value or value";
+      my $content_length = delete $args{value_length} // length $args{value};
+      defined $content_length or croak "Require value_length or value";
+
+      my $part_size = $self->{part_size};
+
+      my $gen_content;
+      if( my $gen_value = delete $args{gen_value} ) {
+         $gen_content = $gen_value;
+      }
+      elsif( my $value  = delete $args{value} ) {
+         $gen_content = sub {
+            return substr( $value, $_[0], $_[1] );
+         };
+      }
+      else {
+         croak "Require gen_value or value";
+      }
+
+      if( $content_length > $part_size * 10_000 ) {
+         croak "Cannot upload content in more than 10,000 parts - consider using a larger part_size";
+      }
+      elsif( $content_length > $part_size ) {
+         $use_multipart = 1;
+         my $pos = 0;
+         $gen_parts = sub {
+            return if $pos >= $content_length;
+
+            my $start = $pos;
+            my $end = $pos + $part_size;
+            $end = $content_length if $end > $content_length;
+
+            $pos = $end;
+
+            return ( $end - $start, sub {
+               my ( $pos, $length ) = @_;
+               $pos += $start;
+               return $gen_content->( $pos, $length );
+            });
+
+            die "Yield a part starting at $pos until $end\n";
+         };
+      }
+      else {
+         $use_multipart = 0;
+         $gen_parts = sub {
+            return ( $content_length, $gen_content );
+         };
+      }
    }
 
-   my $chunk_size = $self->{multipart_chunk_size};
-
-   if( $content_length > $chunk_size * 10_000 ) {
-      croak "Cannot upload content in more than 10,000 parts - consider using a larger multipart_chunk_size";
-   }
-   elsif( $content_length <= $chunk_size ) {
+   if( !$use_multipart ) {
+      my ( $content_length, $gen_content ) = $gen_parts->();
       $self->_retry( "_put_object",
          bucket         => $args{bucket},
          path           => $args{key},
@@ -697,28 +787,24 @@ sub put_object
 
          my $part_num = 0;
          repeat {
-            my ( $part_num, $start ) = @{$_[0]};
-            my $end = $start + $chunk_size;
-            $end = $content_length if $end > $content_length;
+            my ( $part_num, $content_length, $gen_content ) = @{$_[0]};
 
             $self->_retry( "_put_object",
                bucket         => $args{bucket},
                path           => $args{key},
-               start_pos      => $start,
-               content_length => $end - $start,
+               content_length => $content_length,
                gen_content    => $gen_content,
                query_params   => {
-                  partNumber     => $part_num + 1, # 1-based
+                  partNumber     => $part_num,
                   uploadId       => $id,
                },
             )->on_done( sub {
                my ( $etag ) = @_;
-               push @etags, [ $part_num + 1, $etag ];
+               push @etags, [ $part_num, $etag ];
             })
          } generate => sub {
-            my $start = $part_num * $chunk_size;
-            return if $start >= $content_length;
-            return [ $part_num++, $start ];
+            my ( $content_length, $gen_content ) = $gen_parts->() or return;
+            return [ ++$part_num, $content_length, $gen_content ];
          }, while => sub {
             !$_[0]->failure;
          }, otherwise => sub {

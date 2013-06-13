@@ -33,7 +33,8 @@ $loop->add( $s3 );
    );
 
    my $req;
-   wait_for { $req = $http->pending_request };
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
 
    is( $req->method,         "GET",                     'Request method' );
    is( $req->uri->authority, "bucket.s3.amazonaws.com", 'Request URI authority' );
@@ -106,7 +107,8 @@ EOF
    );
 
    my $req;
-   wait_for { $req = $http->pending_request };
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
 
    is( $req->method,         "GET",                     'Request method' );
    is( $req->uri->authority, "bucket.s3.amazonaws.com", 'Request URI authority' );
@@ -141,7 +143,8 @@ EOF
 EOF
    );
 
-   wait_for { $req = $http->pending_request };
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
 
    is( $req->method,         "GET",                     'Request part2 method' );
    is( $req->uri->authority, "bucket.s3.amazonaws.com", 'Request part2 URI authority' );
@@ -211,7 +214,8 @@ EOF
    );
 
    my $req;
-   wait_for { $req = $http->pending_request };
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
 
    is( $req->method,         "GET",                     'Request method' );
    is( $req->uri->authority, "bucket.s3.amazonaws.com", 'Request URI authority' );
