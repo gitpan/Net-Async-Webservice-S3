@@ -9,7 +9,7 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 
 use Carp;
 
@@ -24,8 +24,6 @@ use Scalar::Util qw( blessed );
 use URI::Escape qw( uri_escape_utf8 );
 use XML::LibXML;
 use XML::LibXML::XPathContext;
-
-use constant READ_SIZE => 64*1024; # 64 KiB
 
 my $libxml = XML::LibXML->new;
 
@@ -61,6 +59,7 @@ sub _init
 
    $args->{max_retries} //= 3;
    $args->{list_max_keys} //= 1000;
+   $args->{read_size} //= 64*1024; # 64 KiB
 
    # S3 docs suggest > 100MB should use multipart. They don't actually
    # document what size of parts to use, but we'll use that again.
@@ -120,9 +119,14 @@ will be required per method call. Defaults to 1000.
 
 =item part_size => INT
 
-Optional. Size in bytes to break content for using multipart upload. If an object
-key's size is no larger than this value, multipart upload will not be used.
-Defaults to 100 MiB. (Used to be called C<multipart_chunk_size>.
+Optional. Size in bytes to break content for using multipart upload. If an
+object key's size is no larger than this value, multipart upload will not be
+used. Defaults to 100 MiB. (Used to be called C<multipart_chunk_size>.
+
+=item read_size => INT
+
+Optional. Size in bytes to read per call to the C<$gen_value> content
+generation function in C<put_object>. Defaults to 64 KiB.
 
 =back
 
@@ -137,7 +141,7 @@ sub configure
    $args{part_size} = delete $args{multipart_chunk_size} if defined $args{multipart_chunk_size};
 
    foreach (qw( http access_key secret_key bucket prefix max_retries list_max_keys
-                part_size )) {
+                part_size read_size )) {
       defined $args{$_} and $self->{$_} = delete $args{$_};
    }
 
@@ -516,43 +520,46 @@ The name of the key to put the value in
 
 =item value => STRING
 
-Optional. If provided, gives a byte string as the new value for the key
+=item value => Future giving STRING
+
+Optional. If provided, gives a byte string as the new value for the key or a
+L<Future> which will eventually yield such.
+
+=item value => CODE
+
+=item value_length => INT
+
+Alternative form of C<value>, which is a C<CODE> reference to a generator
+function. It will be called repeatedly to generate small chunks of content,
+being passed the position and length it should yield.
+
+ $chunk = $value->( $pos, $len )
+
+Typically this can be provided either by a C<substr> operation on a larger
+string buffer, or a C<sysseek> and C<sysread> operation on a filehandle.
+
+In normal operation the function will just be called in a single sweep in
+contiguous regions up to the extent given by C<value_length>. If however, the
+MD5sum check fails at the end of upload, it will be called again to retry the
+operation. The function must therefore be prepared to be invoked multiple
+times over its range.
 
 =item gen_parts => CODE
 
 Alternative to C<value> in the case of larger values, and implies the use of
 multipart upload. Called repeatedly to generate successive parts of the
-upload. Each time it is called it should yield two values; an integer giving
-the length of this part, and a generator used to create it. The generator must
-be a code reference of the same form as given in C<gen_value> below. When
-there are no more parts it should return an empty list.
+upload. Each time C<gen_parts> is called it should return either a byte string
+containing the value for that part, a L<Future> which will eventually yield a
+byte string, or a 2-element list consisting of a CODE reference to the part's
+generator function and the length in bytes that it will eventually yield.
 
- ( $value_length, $gen_value ) = $gen_parts->()
+ ( $value ) = $gen_parts->()
 
-The C<$pos> parameter to C<$gen_value> will begin at zero for each part.
+ ( $value_f ) = $gen_parts->(); $value = $value_f->get
 
-=item gen_value => CODE
+ ( $gen_value, $value_length ) = $gen_parts->()
 
-DEPRECATED. See instead C<gen_parts>
-
-Alternative to C<value> in the case of larger values. Called repeatedly to
-generate successive chunks of the value. Each invocation will be passed a byte
-position and length, and should return a string of bytes.
-
- $bytes = $gen_value->( $pos, $length )
-
-This callback will not be invoked on a range outside of the length given by
-the C<value_length> parameter. It may return a shorter byte chunk than
-requested.
-
-If it declines entirely to yield enough content (by returning C<undef>) then
-the remainder of the declared content length will be null-padded. If it
-returns too much content, it will be truncated.
-
-=item value_length => INT
-
-If C<gen_value> is given instead of C<value>, this argument must be provided
-and gives the length of the data that C<gen_value> will eventually generate.
+Each case is analogous to the types that the C<value> key can take.
 
 =back
 
@@ -571,7 +578,7 @@ will be returned if these do not match.
 
 sub _md5sum_wrap
 {
-   my ( $content, $md5ctx, $posref, $content_length ) = @_;
+   my ( $content, $md5ctx, $posref, $content_length, $read_size ) = @_;
 
    if( !defined $content ) {
       $content = "\0" x ( $content_length - $$posref );
@@ -595,17 +602,17 @@ sub _md5sum_wrap
          return undef if $$posref >= $content_length;
 
          my $len = $content_length - $$posref;
-         $len = READ_SIZE if $len > READ_SIZE;
+         $len = $read_size if $len > $read_size;
 
          my $chunk = $content->( $$posref, $len );
-         return _md5sum_wrap( $chunk, $md5ctx, $posref, $content_length );
+         return _md5sum_wrap( $chunk, $md5ctx, $posref, $content_length, $read_size );
       }
    }
    elsif( blessed $content and $content->isa( "Future" ) ) {
       return $content->transform(
          done => sub {
             my ( $chunk ) = @_;
-            return _md5sum_wrap( $chunk, $md5ctx, $posref, $content_length );
+            return _md5sum_wrap( $chunk, $md5ctx, $posref, $content_length, $read_size );
          },
       );
    }
@@ -619,26 +626,34 @@ sub _put_object
    my $self = shift;
    my %args = @_;
 
-   my $content_length = $args{content_length};
-   my $gen_content    = $args{gen_content};
-
-   my $request = $self->_make_request(
-      %args,
-      method  => "PUT",
-      content => "", # Doesn't matter, it'll be ignored
-   );
-
-   $request->content_length( $content_length );
-   $request->content( "" );
-
    my $md5ctx = Digest::MD5->new;
 
-   my $pos = 0;
+   my $content_f = delete $args{content};
 
-   $self->_do_request( $request,
-      expect_continue => 1,
-      request_body => _md5sum_wrap( $gen_content, $md5ctx, \$pos, $content_length ),
-   )->then( sub {
+   # Make $content_f definitely a Future
+   $content_f = Future->new->done( $content_f ) unless blessed $content_f and $content_f->isa( "Future" );
+
+   $content_f->then( sub {
+      my ( $content ) = @_;
+      my $content_length = ref $content ? $args{content_length} : length $content;
+      defined $content_length or die "TODO: referential content $content needs length";
+
+      my $request = $self->_make_request(
+         %args,
+         method  => "PUT",
+         content => "", # Doesn't matter, it'll be ignored
+      );
+
+      $request->content_length( $content_length );
+      $request->content( "" );
+
+      my $pos = 0;
+
+      $self->_do_request( $request,
+         expect_continue => 1,
+         request_body => _md5sum_wrap( $content, $md5ctx, \$pos, $content_length, $self->{read_size} ),
+      )
+   })->then( sub {
       my $resp = shift;
 
       defined( my $etag = $resp->header( "ETag" ) ) or
@@ -707,131 +722,125 @@ sub _complete_multipart_upload
    });
 }
 
+sub _put_object_multipart
+{
+   my $self = shift;
+   my ( $gen_parts, %args ) = @_;
+
+   my @etags;
+
+   $self->_retry( "_initiate_multipart_upload",
+      %args
+   )->then( sub {
+      my ( $id ) = @_;
+
+      my $part_num = 0;
+      repeat {
+         my ( $part_num, $content, %moreargs ) = @{$_[0]};
+
+         $self->_retry( "_put_object",
+            bucket       => $args{bucket},
+            path         => $args{key},
+            content      => $content,
+            query_params => {
+               partNumber   => $part_num,
+               uploadId     => $id,
+            },
+            %moreargs,
+         )->on_done( sub {
+            my ( $etag ) = @_;
+            push @etags, [ $part_num, $etag ];
+         })
+      } generate => sub {
+         my @content = $gen_parts->() or return;
+         $part_num++;
+         return [ $part_num, $content[0] ] if @content == 1;
+         return [ $part_num, $content[0], content_length => $content[1] ] if @content == 2 and ref $content[0] eq "CODE";
+         die "Unsure what to do with gen_part result @content";
+      }, while => sub {
+         !$_[0]->failure;
+      }, otherwise => sub {
+         return Future->new->done( $id, @etags );
+      }, return => $self->loop->new_future;
+   })->then( sub {
+      my ( $id, @etags ) = @_;
+
+      my $doc = XML::LibXML::Document->new( "1.0", "UTF-8" );
+      $doc->addChild( my $root = $doc->createElement( "CompleteMultipartUpload" ) );
+
+      #add content
+      foreach ( @etags ) {
+         my ( $part_num, $etag ) = @$_;
+
+         $root->addChild( my $part = $doc->createElement('Part') );
+         $part->appendTextChild( PartNumber => $part_num );
+         $part->appendTextChild( ETag       => $etag );
+      }
+
+      $self->_retry( "_complete_multipart_upload",
+         %args,
+         id      => $id,
+         content => $doc->toString,
+      );
+   });
+}
+
 sub put_object
 {
    my $self = shift;
    my %args = @_;
 
-   my $use_multipart;
    my $gen_parts;
    if( $gen_parts = delete $args{gen_parts} ) {
-      $use_multipart = 1;
+      # OK
    }
    else {
-      my $content_length = delete $args{value_length} // length $args{value};
-      defined $content_length or croak "Require value_length or value";
+      my $content_length = $args{value_length} // length $args{value};
 
       my $part_size = $self->{part_size};
-
-      my $gen_content;
-      if( my $gen_value = delete $args{gen_value} ) {
-         $gen_content = $gen_value;
-      }
-      elsif( my $value  = delete $args{value} ) {
-         $gen_content = sub {
-            return substr( $value, $_[0], $_[1] );
-         };
-      }
-      else {
-         croak "Require gen_value or value";
-      }
 
       if( $content_length > $part_size * 10_000 ) {
          croak "Cannot upload content in more than 10,000 parts - consider using a larger part_size";
       }
       elsif( $content_length > $part_size ) {
-         $use_multipart = 1;
-         my $pos = 0;
          $gen_parts = sub {
-            return if $pos >= $content_length;
-
-            my $start = $pos;
-            my $end = $pos + $part_size;
-            $end = $content_length if $end > $content_length;
-
-            $pos = $end;
-
-            return ( $end - $start, sub {
-               my ( $pos, $length ) = @_;
-               $pos += $start;
-               return $gen_content->( $pos, $length );
-            });
-
-            die "Yield a part starting at $pos until $end\n";
+            return unless length $args{value};
+            return substr( $args{value}, 0, $part_size, "" );
          };
       }
       else {
-         $use_multipart = 0;
-         $gen_parts = sub {
-            return ( $content_length, $gen_content );
-         };
+         my @parts = ( [ delete $args{value}, $content_length ] );
+         $gen_parts = sub { return unless @parts; @{ shift @parts } };
       }
    }
 
-   if( !$use_multipart ) {
-      my ( $content_length, $gen_content ) = $gen_parts->();
-      $self->_retry( "_put_object",
-         bucket         => $args{bucket},
-         path           => $args{key},
-         content_length => $content_length,
-         gen_content    => $gen_content,
-      );
-   }
-   else {
-      my @etags;
+   my @parts;
+   push @parts, [ $gen_parts->() ];
 
-      $self->_retry( "_initiate_multipart_upload",
-         %args
-      )->then( sub {
-         my ( $id ) = @_;
+   # Ensure first part is a Future
+   blessed $parts[0][0] and $parts[0][0]->isa( "Future" ) or
+      $parts[0][0] = $self->loop->new_future->done( $parts[0][0] );
 
-         my $part_num = 0;
-         repeat {
-            my ( $part_num, $content_length, $gen_content ) = @{$_[0]};
+   $parts[0][0]->then( sub {
+      # unfuture it
+      ( $parts[0][0] ) = @_;
 
-            $self->_retry( "_put_object",
-               bucket         => $args{bucket},
-               path           => $args{key},
-               content_length => $content_length,
-               gen_content    => $gen_content,
-               query_params   => {
-                  partNumber     => $part_num,
-                  uploadId       => $id,
-               },
-            )->on_done( sub {
-               my ( $etag ) = @_;
-               push @etags, [ $part_num, $etag ];
-            })
-         } generate => sub {
-            my ( $content_length, $gen_content ) = $gen_parts->() or return;
-            return [ ++$part_num, $content_length, $gen_content ];
-         }, while => sub {
-            !$_[0]->failure;
-         }, otherwise => sub {
-            return Future->new->done( $id, @etags );
-         }, return => $self->loop->new_future;
-      })->then( sub {
-         my ( $id, @etags ) = @_;
+      push @parts, [ $gen_parts->() ];
 
-         my $doc = XML::LibXML::Document->new( "1.0", "UTF-8" );
-         $doc->addChild( my $root = $doc->createElement( "CompleteMultipartUpload" ) );
-
-         #add content
-         foreach ( @etags ) {
-            my ( $part_num, $etag ) = @$_;
-
-            $root->addChild( my $part = $doc->createElement('Part') );
-            $part->appendTextChild( PartNumber => $part_num );
-            $part->appendTextChild( ETag       => $etag );
-         }
-
-         $self->_retry( "_complete_multipart_upload",
-            %args,
-            id      => $id,
-            content => $doc->toString,
+      if( @{ $parts[1] } ) {
+         # There are at least two parts; we'd better use multipart upload
+         $self->_put_object_multipart( sub { @parts ? @{ shift @parts } : goto &$gen_parts }, %args );
+      }
+      else {
+         my ( $content, $content_length ) = @{ shift @parts };
+         $self->_retry( "_put_object",
+            bucket         => $args{bucket},
+            path           => $args{key},
+            content        => $content,
+            content_length => $content_length,
          );
-      });
-   }
+      }
+   });
 }
 
 =head2 $f = $s3->delete_object( %args )

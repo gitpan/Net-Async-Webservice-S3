@@ -60,6 +60,10 @@ PARAMETERS
             multipart upload will not be used. Defaults to 100 MiB. (Used to
             be called `multipart_chunk_size'.
 
+    read_size => INT
+            Optional. Size in bytes to read per call to the `$gen_value'
+            content generation function in `put_object'. Defaults to 64 KiB.
+
 METHODS
   $f = $s3->list_bucket( %args )
     Requests a list of the keys in a bucket, optionally within some prefix.
@@ -144,46 +148,48 @@ METHODS
             The name of the key to put the value in
 
     value => STRING
+    value => Future giving STRING
             Optional. If provided, gives a byte string as the new value for
-            the key
+            the key or a Future which will eventually yield such.
+
+    value => CODE
+    value_length => INT
+            Alternative form of `value', which is a `CODE' reference to a
+            generator function. It will be called repeatedly to generate
+            small chunks of content, being passed the position and length it
+            should yield.
+
+             $chunk = $value->( $pos, $len )
+
+            Typically this can be provided either by a `substr' operation on
+            a larger string buffer, or a `sysseek' and `sysread' operation
+            on a filehandle.
+
+            In normal operation the function will just be called in a single
+            sweep in contiguous regions up to the extent given by
+            `value_length'. If however, the MD5sum check fails at the end of
+            upload, it will be called again to retry the operation. The
+            function must therefore be prepared to be invoked multiple times
+            over its range.
 
     gen_parts => CODE
             Alternative to `value' in the case of larger values, and implies
             the use of multipart upload. Called repeatedly to generate
-            successive parts of the upload. Each time it is called it should
-            yield two values; an integer giving the length of this part, and
-            a generator used to create it. The generator must be a code
-            reference of the same form as given in `gen_value' below. When
-            there are no more parts it should return an empty list.
+            successive parts of the upload. Each time `gen_parts' is called
+            it should return either a byte string containing the value for
+            that part, a Future which will eventually yield a byte string,
+            or a 2-element list consisting of a CODE reference to the part's
+            generator function and the length in bytes that it will
+            eventually yield.
 
-             ( $value_length, $gen_value ) = $gen_parts->()
+             ( $value ) = $gen_parts->()
 
-            The `$pos' parameter to `$gen_value' will begin at zero for each
-            part.
+             ( $value_f ) = $gen_parts->(); $value = $value_f->get
 
-    gen_value => CODE
-            DEPRECATED. See instead `gen_parts'
+             ( $gen_value, $value_length ) = $gen_parts->()
 
-            Alternative to `value' in the case of larger values. Called
-            repeatedly to generate successive chunks of the value. Each
-            invocation will be passed a byte position and length, and should
-            return a string of bytes.
-
-             $bytes = $gen_value->( $pos, $length )
-
-            This callback will not be invoked on a range outside of the
-            length given by the `value_length' parameter. It may return a
-            shorter byte chunk than requested.
-
-            If it declines entirely to yield enough content (by returning
-            `undef') then the remainder of the declared content length will
-            be null-padded. If it returns too much content, it will be
-            truncated.
-
-    value_length => INT
-            If `gen_value' is given instead of `value', this argument must
-            be provided and gives the length of the data that `gen_value'
-            will eventually generate.
+            Each case is analogous to the types that the `value' key can
+            take.
 
     The Future will return a single string containing the S3 ETag of the
     newly-set key. For single-part uploads this will be the MD5 sum in hex,

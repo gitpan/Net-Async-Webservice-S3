@@ -1,5 +1,12 @@
 Revision history for Net-Async-Webservice-S3
 
+0.05    CHANGES:
+         * Completely rewritten (multipart) PUT logic - can now use plain
+           strings, Futures, or CODE generator functions.
+         * Better detection of when multipart is or isn't required
+         * Created some little example scripts that perform simple
+           list/get/put/delete operations
+
 0.04    CHANGES:
          * New 'gen_parts' multipart generator to replace 'gen_value'
          * Support generating parts from Futures

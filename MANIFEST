@@ -1,5 +1,9 @@
 Build.PL
 Changes
+examples/s3-cat
+examples/s3-ls
+examples/s3-rm
+examples/s3-uncat
 lib/Net/Async/Webservice/S3.pm
 LICENSE
 Makefile.PL
