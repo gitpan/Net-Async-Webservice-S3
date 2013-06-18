@@ -1,5 +1,11 @@
 Revision history for Net-Async-Webservice-S3
 
+0.06    CHANGES:
+         * Added ->head_object
+         * Support setting and retrieving S3 metadata on keys
+         * Allow ->configure keys to be set back to undef
+         * Deleted now-deprecated legacy 'multipart_chunk_size' configure key
+
 0.05    CHANGES:
          * Completely rewritten (multipart) PUT logic - can now use plain
            strings, Futures, or CODE generator functions.

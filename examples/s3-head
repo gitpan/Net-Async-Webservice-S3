@@ -4,12 +4,11 @@ use strict;
 use warnings;
 
 use Getopt::Long;
-use IO::Async::Stream 0.57;
 use IO::Async::Loop;
 use Net::Async::Webservice::S3;
 
 GetOptions(
-   'meta|m=s' => \my %META,
+   'meta|m' => \my $META,
 ) or exit 1;
 
 my $loop = IO::Async::Loop->new;
@@ -29,18 +28,16 @@ my $s3 = Net::Async::Webservice::S3->new(
 
 $loop->add( $s3 );
 
-$loop->add( my $stdin = IO::Async::Stream->new_for_stdin( on_read => sub { 0 } ) );
-
-# TODO: IO::Async::Stream 0.58's ->is_read_eof isn't set until after the read
-# handler returns, so we need to capture $eof here to detect the EOF condition
-
-my $eof;
-$s3->put_object(
+my ( $header, $meta ) = $s3->head_object(
    key => shift @ARGV,
-   gen_parts => sub {
-      return if $eof;
-      return $stdin->read_exactly( 100*1024*1024 ) # 100 MiB
-         ->on_done( sub { ( undef, $eof ) = @_; } );
-   },
-   meta => \%META,
 )->get;
+
+if( $META ) {
+   print "$_=$meta->{$_}\n" for sort keys %$meta;
+}
+else {
+   $header->scan( sub {
+      my ( $key, $value ) = @_;
+      print "$key: $value\n";
+   });
+}

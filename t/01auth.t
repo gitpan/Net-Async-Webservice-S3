@@ -8,6 +8,7 @@ use t::TestHTTP;
 
 use IO::Async::Test;
 use IO::Async::Loop;
+use Digest::MD5 qw( md5_hex );
 
 use HTTP::Response;
 
@@ -24,6 +25,8 @@ my $loop = IO::Async::Loop->new;
 testing_loop( $loop );
 
 my $s3 = Net::Async::Webservice::S3->new(
+   max_retries => 1,
+
    http => my $http = TestHTTP->new,
    access_key => 'ABCDEFGHIJKLMNOPQRST',
    secret_key => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLOP',
@@ -71,6 +74,43 @@ isa_ok( $s3, "Net::Async::Webservice::S3", '$s3' );
   <IsTruncated>false</IsTruncated>
 </ListBucketResult>
 EOF
+   );
+
+   wait_for { $f->is_ready };
+
+   is( scalar $f->failure, undef, '$f is done with no failure' );
+}
+
+# put_object
+{
+   my $f = $s3->put_object(
+      bucket => "bucket",
+      key    => "key",
+      value  => "value",
+      meta   => {
+         Name   => "Value",
+      },
+   );
+
+   my $req;
+   wait_for { $req = $http->pending_request };
+
+   is( $req->method, "PUT", '$req->method' );
+   is( $req->uri, "http://bucket.s3.amazonaws.com/key", '$req->uri' );
+
+   # Assert the date header, as auth depends on it
+   is( $req->header( "Date" ), "Sun, 26 May 2013 17:06:17 GMT", '$req->header("Date")' );
+
+   is( $req->authorization,
+       "AWS ABCDEFGHIJKLMNOPQRST:g5JHKddLnz+80yOroYNnvSogWIY=",
+       '$req->authorization' );
+
+   my $md5 = md5_hex( $req->content );
+
+   $http->respond(
+      HTTP::Response->new( 200, "OK", [
+         Etag => qq("$md5"),
+      ], '' )
    );
 
    wait_for { $f->is_ready };

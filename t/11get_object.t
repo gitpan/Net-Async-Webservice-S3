@@ -114,6 +114,64 @@ EOF
 
    wait_for { $f->is_ready };
    $f->get;
+
+   $s3->configure(
+      bucket => undef,
+      prefix => undef,
+   );
+}
+
+# Get with metadata
+{
+   my $f = $s3->get_object(
+      bucket => "bucket",
+      key    => "ONE",
+   );
+
+   my $req;
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
+
+   $http->respond(
+      HTTP::Response->new( 200, "OK", [
+         Content_Type => "text/plain",
+         'X-Amz-Meta-One' => "one",
+      ], <<'EOF' )
+value
+EOF
+   );
+
+   wait_for { $f->is_ready };
+
+   my ( $value, $response, $meta ) = $f->get;
+   is_deeply( $meta, { One => "one" }, '$meta for get with metadata' );
+}
+
+# Simple head
+{
+   my $f = $s3->head_object(
+      bucket => "bucket",
+      key    => "one",
+   );
+
+   my $req;
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
+
+   is( $req->method,         "HEAD",                    'Request method' );
+   is( $req->uri->authority, "bucket.s3.amazonaws.com", 'Request URI authority' );
+   is( $req->uri->path,      "/one",                    'Request URI path' );
+
+   $http->respond(
+      HTTP::Response->new( 200, "OK", [
+         Content_Type => "text/plain",
+      ], '' )
+   );
+
+   wait_for { $f->is_ready };
+
+   my ( $response ) = $f->get;
+   is( $response->content_type, "text/plain", '$response->content_type for simple get' );
 }
 
 done_testing;

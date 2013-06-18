@@ -9,7 +9,7 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 
 use Carp;
 
@@ -63,7 +63,7 @@ sub _init
 
    # S3 docs suggest > 100MB should use multipart. They don't actually
    # document what size of parts to use, but we'll use that again.
-   $args->{part_size} //= $args->{multipart_chunk_size} // 100*1024*1024;
+   $args->{part_size} //= 100*1024*1024;
 
    return $self->SUPER::_init( @_ );
 }
@@ -121,7 +121,7 @@ will be required per method call. Defaults to 1000.
 
 Optional. Size in bytes to break content for using multipart upload. If an
 object key's size is no larger than this value, multipart upload will not be
-used. Defaults to 100 MiB. (Used to be called C<multipart_chunk_size>.
+used. Defaults to 100 MiB.
 
 =item read_size => INT
 
@@ -137,12 +137,9 @@ sub configure
    my $self = shift;
    my %args = @_;
 
-   # Legacy name
-   $args{part_size} = delete $args{multipart_chunk_size} if defined $args{multipart_chunk_size};
-
    foreach (qw( http access_key secret_key bucket prefix max_retries list_max_keys
                 part_size read_size )) {
-      defined $args{$_} and $self->{$_} = delete $args{$_};
+      exists $args{$_} and $self->{$_} = delete $args{$_};
    }
 
    $self->SUPER::configure( %args );
@@ -181,9 +178,12 @@ sub _make_request
 
    my $s3 = $self->{s3};
 
+   my $meta = $args{meta} || {};
+
    my @headers = (
       Date => time2str( time ),
       %{ $args{headers} || {} },
+      ( map { +"X-Amz-Meta-$_" => $meta->{$_} } sort keys %$meta ),
    );
 
    my $request = HTTP::Request->new( $method, $uri, \@headers, $args{content} );
@@ -218,13 +218,20 @@ sub _gen_auth_header
       $canon_resource .= "?" . join( "&", @params_to_sign ) if @params_to_sign;
    }
 
+   my %x_amz_headers;
+   $request->scan( sub {
+      $x_amz_headers{lc $_[0]} = $_[1] if $_[0] =~ m/^X-Amz-/i;
+   });
+
+   my $x_amz_headers = "";
+   $x_amz_headers .= "$_:$x_amz_headers{$_}\n" for sort keys %x_amz_headers;
+
    my $buffer = join( "\n",
       $request->method,
       $request->header( "Content-MD5" ) // "",
       $request->header( "Content-Type" ) // "",
       $request->header( "Date" ) // "",
-      # No AMZ headers
-      $canon_resource );
+      $x_amz_headers . $canon_resource );
 
    my $s3 = $self->{s3};
 
@@ -439,9 +446,9 @@ The name of the key to query
 =item on_chunk => CODE
 
 Optional. If supplied, this code will be invoked repeatedly on receipt of more
-bytes of the key's value. It will be passed an L<HTTP::Response> object
-containing the key's metadata, and a byte string containing more bytes of the
-value. Its return value is not important.
+bytes of the key's value. It will be passed the L<HTTP::Response> object
+received in reply to the request, and a byte string containing more bytes of
+the value. Its return value is not important.
 
  $on_chunk->( $header, $bytes )
 
@@ -450,10 +457,11 @@ final result of the Future will be an empty string.
 
 =back
 
-The Future will return a byte string containing the key's value and the
-L<HTTP::Response> containing the key's metadata.
+The Future will return a byte string containing the key's value, the
+L<HTTP::Response> that was received, and a hash reference containing any of
+the metadata fields, if found in the response.
 
- ( $value, $response ) = $f->get;
+ ( $value, $response, $meta ) = $f->get;
 
 If an C<on_chunk> code reference is passed, this string will be empty.
 
@@ -467,7 +475,7 @@ sub _get_object
    my $on_chunk = delete $args{on_chunk};
 
    my $request = $self->_make_request(
-      method => "GET",
+      method => $args{method},
       bucket => $args{bucket},
       path   => $args{key},
    );
@@ -492,14 +500,43 @@ sub _get_object
 
    return $get_f->then( sub {
       my $resp = shift;
-      return Future->new->done( $resp->content, $resp );
+      my %meta;
+      $resp->scan( sub {
+         $_[0] =~ m/^X-Amz-Meta-(.*)$/i and $meta{$1} = $_[1];
+      });
+      return Future->new->done( $resp->content, $resp, \%meta );
    } );
 }
 
 sub get_object
 {
    my $self = shift;
-   $self->_retry( "_get_object", @_ );
+   $self->_retry( "_get_object", @_, method => "GET" );
+}
+
+=head2 $f = $s3->head_object( %args )
+
+Requests the value metadata of a key from a bucket. This is similar to the
+C<get_object> method, but uses the C<HEAD> HTTP verb instead of C<GET>.
+
+Takes the same named arguments as C<get_object>, but will ignore an
+C<on_chunk> callback, if provided.
+
+The Future will return the L<HTTP::Response> object and metadata hash
+reference, without the content string (as no content is returned to a C<HEAD>
+request).
+
+ ( $response, $meta ) = $f->get;
+
+=cut
+
+sub head_object
+{
+   my $self = shift;
+   $self->_retry( "_get_object", @_, method => "HEAD" )->then( sub {
+      shift; # no content
+      return Future->new->done( @_ );
+   });
 }
 
 =head2 $f = $s3->put_object( %args )
@@ -560,6 +597,11 @@ generator function and the length in bytes that it will eventually yield.
  ( $gen_value, $value_length ) = $gen_parts->()
 
 Each case is analogous to the types that the C<value> key can take.
+
+=item meta => HASH
+
+Optional. If provided, gives additional user metadata fields to set on the
+object, using the C<X-Amz-Meta-> fields.
 
 =back
 
@@ -685,6 +727,7 @@ sub _initiate_multipart_upload
       bucket  => $args{bucket},
       path    => "$args{key}?uploads",
       content => "",
+      meta    => $args{meta},
    );
 
    $self->_do_request_xpc( $req )->then( sub {
@@ -838,6 +881,7 @@ sub put_object
             path           => $args{key},
             content        => $content,
             content_length => $content_length,
+            meta           => $args{meta},
          );
       }
    });
