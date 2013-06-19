@@ -24,7 +24,7 @@
          "requires" : {
             "Digest::HMAC_SHA1" : "0",
             "Digest::MD5" : "0",
-            "Future" : "0.13",
+            "Future" : "0.14",
             "HTTP::Date" : "0",
             "HTTP::Request" : "0",
             "IO::Async::Stream" : "0.57",
@@ -38,7 +38,7 @@
    "provides" : {
       "Net::Async::Webservice::S3" : {
          "file" : "lib/Net/Async/Webservice/S3.pm",
-         "version" : "0.06"
+         "version" : "0.07"
       }
    },
    "release_status" : "stable",
@@ -47,5 +47,5 @@
          "http://dev.perl.org/licenses/"
       ]
    },
-   "version" : "0.06"
+   "version" : "0.07"
 }

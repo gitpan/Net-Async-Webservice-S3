@@ -9,13 +9,13 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.06';
+our $VERSION = '0.07';
 
 use Carp;
 
 use Digest::HMAC_SHA1;
 use Digest::MD5 qw( md5 );
-use Future 0.13; # ->then
+use Future 0.14; # ->then, ->wrap
 use Future::Utils qw( repeat );
 use HTTP::Date qw( time2str );
 use HTTP::Request;
@@ -155,6 +155,7 @@ sub _make_request
    my %args = @_;
 
    my $method = $args{method};
+   defined $args{content} or croak "Missing 'content'";
 
    my @params;
    foreach my $key ( sort keys %{ $args{query_params} } ) {
@@ -203,7 +204,7 @@ sub _gen_auth_header
    #   http://docs.aws.amazon.com/AmazonS3/latest/dev/RESTAuthentication.html#ConstructingTheAuthenticationHeader
 
    my $canon_resource = "/$bucket/$path";
-   if( length $request->uri->query ) {
+   if( defined $request->uri->query and length $request->uri->query ) {
       my %params = $request->uri->query_form;
       my %params_to_sign;
       foreach (qw( partNumber uploadId )) {
@@ -282,7 +283,7 @@ sub _do_request_xpc
       my $xpc = XML::LibXML::XPathContext->new( $libxml->parse_string( $resp->content ) );
       $xpc->registerNs( s3 => "http://s3.amazonaws.com/doc/2006-03-01/" );
 
-      return Future->new->done( $xpc );
+      return Future->wrap( $xpc );
    });
 }
 
@@ -379,6 +380,7 @@ sub _list_bucket
             marker       => $marker,
             max_keys     => $self->{list_max_keys},
          },
+         content      => "",
       );
 
       $self->_do_request_xpc( $req )->then( sub {
@@ -407,7 +409,7 @@ sub _list_bucket
          }
 
          if( $xpc->findvalue( ".//s3:IsTruncated" ) eq "true" ) {
-            return Future->new->done( $last_key );
+            return Future->wrap( $last_key );
          }
          return Future->new->done;
       });
@@ -417,7 +419,7 @@ sub _list_bucket
    return => $self->loop->new_future;
 
    $f->then( sub {
-      return Future->new->done( \@keys, \@prefixes );
+      return Future->wrap( \@keys, \@prefixes );
    });
 }
 
@@ -475,9 +477,10 @@ sub _get_object
    my $on_chunk = delete $args{on_chunk};
 
    my $request = $self->_make_request(
-      method => $args{method},
-      bucket => $args{bucket},
-      path   => $args{key},
+      method  => $args{method},
+      bucket  => $args{bucket},
+      path    => $args{key},
+      content => "",
    );
 
    my $get_f;
@@ -504,7 +507,7 @@ sub _get_object
       $resp->scan( sub {
          $_[0] =~ m/^X-Amz-Meta-(.*)$/i and $meta{$1} = $_[1];
       });
-      return Future->new->done( $resp->content, $resp, \%meta );
+      return Future->wrap( $resp->content, $resp, \%meta );
    } );
 }
 
@@ -535,7 +538,7 @@ sub head_object
    my $self = shift;
    $self->_retry( "_get_object", @_, method => "HEAD" )->then( sub {
       shift; # no content
-      return Future->new->done( @_ );
+      return Future->wrap( @_ );
    });
 }
 
@@ -670,12 +673,8 @@ sub _put_object
 
    my $md5ctx = Digest::MD5->new;
 
-   my $content_f = delete $args{content};
-
-   # Make $content_f definitely a Future
-   $content_f = Future->new->done( $content_f ) unless blessed $content_f and $content_f->isa( "Future" );
-
-   $content_f->then( sub {
+   # Make $content definitely a Future
+   Future->wrap( delete $args{content} )->then( sub {
       my ( $content ) = @_;
       my $content_length = ref $content ? $args{content_length} : length $content;
       defined $content_length or die "TODO: referential content $content needs length";
@@ -704,16 +703,16 @@ sub _put_object
       # Amazon S3 currently documents that the returned ETag header will be
       # the MD5 hash of the content, surrounded in quote marks. We'd better
       # hope this continues to be true... :/
-      my ( $got_md5 ) = $etag =~ m/^"([0-9a-f]{32})"$/ or
+      my ( $got_md5 ) = lc($etag) =~ m/^"([0-9a-f]{32})"$/ or
          return Future->new->die( "Returned ETag ($etag) does not look like an MD5 sum", $resp );
 
-      my $expect_md5 = $md5ctx->hexdigest;
+      my $expect_md5 = lc($md5ctx->hexdigest);
 
       if( $got_md5 ne $expect_md5 ) {
          return Future->new->die( "Returned MD5 hash ($got_md5) did not match expected ($expect_md5)", $resp );
       }
 
-      return Future->new->done( $etag );
+      return Future->wrap( $etag );
    });
 }
 
@@ -734,7 +733,7 @@ sub _initiate_multipart_upload
       my $xpc = shift;
 
       my $id = $xpc->findvalue( ".//s3:InitiateMultipartUploadResult/s3:UploadId" );
-      return Future->new->done( $id );
+      return Future->wrap( $id );
    });
 }
 
@@ -761,7 +760,7 @@ sub _complete_multipart_upload
       my $xpc = shift;
 
       my $etag = $xpc->findvalue( ".//s3:CompleteMultipartUploadResult/s3:ETag" );
-      return Future->new->done( $etag );
+      return Future->wrap( $etag );
    });
 }
 
@@ -803,7 +802,7 @@ sub _put_object_multipart
       }, while => sub {
          !$_[0]->failure;
       }, otherwise => sub {
-         return Future->new->done( $id, @etags );
+         return Future->wrap( $id, @etags );
       }, return => $self->loop->new_future;
    })->then( sub {
       my ( $id, @etags ) = @_;
