@@ -15,7 +15,9 @@ name: Net-Async-Webservice-S3
 provides:
   Net::Async::Webservice::S3:
     file: lib/Net/Async/Webservice/S3.pm
-    version: 0.07
+    version: 0.08
+recommends:
+  IO::Async::SSL: 0
 requires:
   Digest::HMAC_SHA1: 0
   Digest::MD5: 0
@@ -29,4 +31,4 @@ requires:
   XML::LibXML: 0
 resources:
   license: http://dev.perl.org/licenses/
-version: 0.07
+version: 0.08

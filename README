@@ -3,7 +3,30 @@ NAME
     `IO::Async'
 
 SYNOPSIS
-     TODO
+     use IO::Async::Loop;
+     use Net::Async::Webservice::S3;
+
+     my $loop = IO::Async::Loop->new;
+
+     my $s3 = Net::Async::Webservice::S3->new(
+        access_key => ...,
+        secret_key => ...,
+        bucket     => "my-bucket-here",
+     );
+     $loop->add( $s3 );
+
+     my $put_f = $s3->put_object(
+        key   => "the-key",
+        value => "A new value for the key\n";
+     );
+
+     my $get_f = $s3->get_object(
+        key => "another-key",
+     );
+
+     $loop->await_all( $put_f, $get_f );
+
+     print "The value is:\n", $get_f->get;
 
 DESCRIPTION
     This module provides a webservice API around Amazon's S3 web service for
@@ -31,6 +54,11 @@ PARAMETERS
     secret_key => STRING
             The twenty-character Access Key ID and forty-character Secret
             Key to use for authenticating requests to S3.
+
+    ssl => BOOL
+            Optional. If given a true value, will use `https' URLs over SSL.
+            Defaults to off. This feature requires the optional
+            IO::Async::SSL module if using Net::Async::HTTP.
 
     bucket => STRING
             Optional. If supplied, gives the default bucket name to use, at

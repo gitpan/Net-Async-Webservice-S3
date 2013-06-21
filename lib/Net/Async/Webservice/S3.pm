@@ -9,7 +9,7 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.07';
+our $VERSION = '0.08';
 
 use Carp;
 
@@ -33,7 +33,30 @@ C<Net::Async::Webservice::S3> - use Amazon's S3 web service with C<IO::Async>
 
 =head1 SYNOPSIS
 
- TODO
+ use IO::Async::Loop;
+ use Net::Async::Webservice::S3;
+
+ my $loop = IO::Async::Loop->new;
+
+ my $s3 = Net::Async::Webservice::S3->new(
+    access_key => ...,
+    secret_key => ...,
+    bucket     => "my-bucket-here",
+ );
+ $loop->add( $s3 );
+
+ my $put_f = $s3->put_object(
+    key   => "the-key",
+    value => "A new value for the key\n";
+ );
+
+ my $get_f = $s3->get_object(
+    key => "another-key",
+ );
+
+ $loop->await_all( $put_f, $get_f );
+
+ print "The value is:\n", $get_f->get;
 
 =head1 DESCRIPTION
 
@@ -94,6 +117,12 @@ it gets added to the underlying L<IO::Async::Loop> instance, if required.
 The twenty-character Access Key ID and forty-character Secret Key to use for
 authenticating requests to S3.
 
+=item ssl => BOOL
+
+Optional. If given a true value, will use C<https> URLs over SSL. Defaults to
+off. This feature requires the optional L<IO::Async::SSL> module if using
+L<Net::Async::HTTP>.
+
 =item bucket => STRING
 
 Optional. If supplied, gives the default bucket name to use, at which point it
@@ -137,8 +166,8 @@ sub configure
    my $self = shift;
    my %args = @_;
 
-   foreach (qw( http access_key secret_key bucket prefix max_retries list_max_keys
-                part_size read_size )) {
+   foreach (qw( http access_key secret_key ssl bucket prefix max_retries
+                list_max_keys part_size read_size )) {
       exists $args{$_} and $self->{$_} = delete $args{$_};
    }
 
@@ -167,13 +196,14 @@ sub _make_request
    my $bucket = $args{bucket} // $self->{bucket};
    my $path   = $args{abs_path} // join "", grep { defined } $self->{prefix}, $args{path};
 
+   my $scheme = $self->{ssl} ? "https" : "http";
+
    my $uri;
-   # TODO: https?
-   if( 1 ) { # TODO: sanity-check bucket
-      $uri = "http://$bucket.s3.amazonaws.com/$path";
+   if( length $bucket <= 63 and $bucket =~ m{^[A-Z0-9][A-Z0-9.-]+$}i ) {
+      $uri = "$scheme://$bucket.s3.amazonaws.com/$path";
    }
    else {
-      $uri = "http://s3.amazonaws.com/$bucket/$path";
+      $uri = "$scheme://s3.amazonaws.com/$bucket/$path";
    }
    $uri .= "?" . join( "&", @params ) if @params;
 
@@ -251,7 +281,11 @@ sub _do_request
    my $self = shift;
    my ( $request, %args ) = @_;
 
-   $self->{http}->do_request( request => $request, %args )->and_then( sub {
+   $self->{http}->do_request(
+      request => $request,
+      SSL => ( $request->uri->scheme eq "https" ),
+      %args
+   )->and_then( sub {
       my $f = shift;
       my $resp = $f->get;
 

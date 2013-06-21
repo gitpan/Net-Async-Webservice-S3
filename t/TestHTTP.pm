@@ -51,6 +51,7 @@ sub do_request
    }
 
    delete $args{expect_continue};
+   delete $args{SSL};
 
    die "TODO: more args: " . join( ", ", keys %args ) if keys %args;
 

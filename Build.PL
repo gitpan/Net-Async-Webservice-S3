@@ -17,6 +17,9 @@ my $build = Module::Build->new(
       'URI::Escape' => 0,
       'XML::LibXML' => 0,
    },
+   recommends => {
+      'IO::Async::SSL' => 0,
+   },
    build_requires => {
       'IO::Async::Test' => 0,
       'Test::More' => '0.88', # done_testing
