@@ -20,5 +20,6 @@ t/12put_object.t
 t/13put_object-multipart.t
 t/14delete_object.t
 t/20retry.t
+t/21stall_timeout.t
 t/99pod.t
 t/TestHTTP.pm

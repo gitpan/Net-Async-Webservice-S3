@@ -7,10 +7,10 @@ use Future;
 use Scalar::Util qw( blessed );
 
 my $pending_request;
+my $pending_request_content;
 my $pending_response;
 my $pending_on_header;
 my $pending_on_chunk;
-my $pending_timeout;
 
 sub new { bless [], shift }
 
@@ -45,11 +45,11 @@ sub do_request
    defined $pending_request and die "Already have a pending request";
 
    $pending_request = delete $args{request};
+   $pending_request_content = delete $args{request_body};
    $pending_on_header = delete $args{on_header};
-   $pending_timeout = delete $args{timeout};
-
-   if( my $request_body = delete $args{request_body} ) {
-      _pull_content( $request_body, $pending_request );
+   if( my $timeout = delete $args{timeout} ) {
+      # Cheat - easier for the unit tests to find it here
+      $pending_request->header( "X-NaHTTP-Timeout" => $timeout );
    }
 
    delete $args{expect_continue};
@@ -64,12 +64,17 @@ sub do_request
 
 sub pending_request
 {
+   if( $pending_request_content ) {
+      _pull_content( $pending_request_content, $pending_request );
+      undef $pending_request_content;
+   }
+
    return $pending_request;
 }
 
-sub pending_timeout
+sub pending_request_plus_content
 {
-   return $pending_timeout;
+   return $pending_request, $pending_request_content;
 }
 
 sub respond

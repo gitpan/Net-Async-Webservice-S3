@@ -17,6 +17,7 @@ my $loop = IO::Async::Loop->new;
 testing_loop( $loop );
 
 my $s3 = Net::Async::Webservice::S3->new(
+   max_retries => 1,
    http => my $http = TestHTTP->new,
    access_key => 'K'x20,
    secret_key => 's'x40,
@@ -172,6 +173,36 @@ EOF
 
    my ( $response ) = $f->get;
    is( $response->content_type, "text/plain", '$response->content_type for simple get' );
+}
+
+# Test that timeout argument is set only for direct argument
+{
+   my $f;
+   my $req;
+
+   $s3->configure( timeout => 10 );
+   $f = $s3->get_object(
+      bucket => "bucket",
+      key    => "-one-",
+   );
+
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
+
+   is( $req->header( "X-NaHTTP-Timeout" ), undef, 'Request has no timeout for configured' );
+   $http->respond( 200, "OK", [] );
+
+   $f = $s3->get_object(
+      bucket  => "bucket",
+      key     => "-one-",
+      timeout => 20,
+   );
+
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
+
+   is( $req->header( "X-NaHTTP-Timeout" ), 20, 'Request has timeout set for immediate' );
+   $http->respond( 200, "OK", [] );
 }
 
 done_testing;

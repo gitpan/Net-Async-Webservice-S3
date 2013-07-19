@@ -18,11 +18,10 @@ my $loop = IO::Async::Loop->new;
 testing_loop( $loop );
 
 my $s3 = Net::Async::Webservice::S3->new(
+   max_retries => 1,
    http => my $http = TestHTTP->new,
    access_key => 'K'x20,
    secret_key => 's'x40,
-
-   max_retries => 1,
 );
 
 $loop->add( $s3 );
@@ -77,6 +76,8 @@ sub await_multipart_part_and_respond
             ETag => qq("$md5"),
          ], "" )
    );
+
+   return ( $req );
 }
 
 sub await_multipart_complete_and_respond
@@ -108,6 +109,8 @@ sub await_multipart_complete_and_respond
 </CompleteMultipartUploadResult>
 EOF
    );
+
+   return ( $req );
 }
 
 # Multipart put from strings
@@ -244,6 +247,64 @@ EOF
    }
 
    await_multipart_complete_and_respond "FOUR";
+
+   wait_for { $f->is_ready };
+   $f->get;
+}
+
+# Test that a configured timeout is only used for meta-operations
+{
+   my $f;
+   my $req;
+   my @parts;
+
+   $s3->configure( timeout => 10 );
+
+   @parts = ( "Part #1", "Part #2" );
+   $f = $s3->put_object(
+      bucket => "bucket",
+      key    => "-four-",
+      gen_parts => sub { return unless @parts; shift @parts },
+   );
+   $f->on_fail( sub { die @_ } );
+
+   ( $req ) = await_multipart_initiate_and_respond "-four-";
+   is( $req->header( "X-NaHTTP-Timeout" ), 10, 'Initiate request has timeout set for configured' );
+
+   # Now wait on the chunks
+   foreach ( [ 1, "Part #1" ], [ 2, "Part #2" ] ) {
+      ( $req ) = await_multipart_part_and_respond "-four-", @$_;
+      is( $req->header( "X-NaHTTP-Timeout" ), undef, 'Part request has no timeout for configured' );
+   }
+
+   ( $req ) = await_multipart_complete_and_respond "-four-";
+   is( $req->header( "X-NaHTTP-Timeout" ), 10, 'Complete request has timeout set for configured' );
+   wait_for { $f->is_ready };
+   $f->get;
+
+   # Now, direct arguments
+   @parts = ( "Part #1", "Part #2" );
+   $f = $s3->put_object(
+      bucket => "bucket",
+      key    => "-four-",
+      gen_parts => sub { return unless @parts; shift @parts },
+      part_timeout => 30,
+      meta_timeout => 20,
+   );
+   $f->on_fail( sub { die @_ } );
+
+   ( $req ) = await_multipart_initiate_and_respond "-four-";
+   is( $req->header( "X-NaHTTP-Timeout" ), 20, 'Initiate request has timeout set for direct' );
+
+   # Now wait on the chunks
+   foreach ( [ 1, "Part #1" ], [ 2, "Part #2" ] ) {
+      ( $req ) = await_multipart_part_and_respond "-four-", @$_;
+      is( $req->header( "X-NaHTTP-Timeout" ), 30, 'Part request timeout set for direct' );
+   }
+
+   ( $req ) = await_multipart_complete_and_respond "-four-";
+   is( $req->header( "X-NaHTTP-Timeout" ), 20, 'Complete request has timeout set for direct' );
+
 
    wait_for { $f->is_ready };
    $f->get;

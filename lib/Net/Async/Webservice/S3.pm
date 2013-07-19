@@ -9,7 +9,7 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.09';
+our $VERSION = '0.10';
 
 use Carp;
 
@@ -19,6 +19,7 @@ use Future 0.14; # ->then, ->wrap
 use Future::Utils qw( repeat );
 use HTTP::Date qw( time2str );
 use HTTP::Request;
+use IO::Async::Timer::Countdown;
 use MIME::Base64 qw( encode_base64 );
 use Scalar::Util qw( blessed );
 use URI::Escape qw( uri_escape_utf8 );
@@ -74,7 +75,7 @@ sub _init
 
    $args->{http} ||= do {
       require Net::Async::HTTP;
-      Net::Async::HTTP->VERSION( '0.19' ); # Futures
+      Net::Async::HTTP->VERSION( '0.27' ); # Futures, ->cancel
       my $http = Net::Async::HTTP->new;
       $self->add_child( $http );
       $http;
@@ -155,14 +156,24 @@ used. Defaults to 100 MiB.
 =item read_size => INT
 
 Optional. Size in bytes to read per call to the C<$gen_value> content
-generation function in C<put_object>. Defaults to 64 KiB.
+generation function in C<put_object>. Defaults to 64 KiB. Be aware that too
+large a value may lead to the C<PUT> stall timer failing to be invoked on slow
+enough connections, causing spurious timeouts.
 
 =item timeout => NUM
 
+Optional. If configured, this is passed into individual requests of the
+underlying C<Net::Async::HTTP> object, except for the actual content C<GET> or
+C<PUT> operations. It is therefore used by C<list_bucket>, C<delete_object>,
+and the multi-part metadata operations used by C<put_object>. To apply an
+overall timeout to an individual C<get_object> or C<put_object> operation,
+pass a specific C<timeout> argument to those methods specifically.
+
 =item stall_timeout => NUM
 
-Optional. If configured, these are passed into the underlying
-C<Net::Async::HTTP> object.
+Optional. If configured, this is passed into the underlying
+C<Net::Async::HTTP> object and used for all download requests. It is also used
+to implement stall timeout logic of content upload during C<PUT> requests.
 
 =back
 
@@ -174,16 +185,16 @@ sub configure
    my %args = @_;
 
    foreach (qw( http access_key secret_key ssl bucket prefix max_retries
-                list_max_keys part_size read_size )) {
+                list_max_keys part_size read_size timeout )) {
       exists $args{$_} and $self->{$_} = delete $args{$_};
    }
 
    # Parameters shared by NaHTTP and locally
-   foreach (qw( timeout stall_timeout )) {
+   foreach (qw( stall_timeout )) {
       next unless exists $args{$_};
 
       $self->{http}->configure( $_ => $args{$_} );
-      $self->{$_} = $args{$_};
+      $self->{$_} = delete $args{$_};
    }
 
    $self->SUPER::configure( %args );
@@ -366,7 +377,12 @@ sub _retry
                  : Future->new->done;
 
       $delay_f->then( sub { $self->$method( @args ) } );
-   } while => sub { shift->failure and --$retries },
+   } while => sub {
+      my $f = shift;
+      my ( $failure, $request, $response ) = $f->failure or return 0; # success
+      return 0 if $response and $response->code =~ m/^4/; # don't retry HTTP 4xx
+      return --$retries;
+   },
      return => $self->loop->new_future;
 }
 
@@ -455,7 +471,8 @@ sub _list_bucket
       );
 
       $self->_do_request_xpc( $req,
-         ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+         timeout       => $args{timeout} // $self->{timeout},
+         stall_timeout => $args{stall_timeout},
       )->then( sub {
          my $xpc = shift;
 
@@ -559,7 +576,8 @@ sub _get_object
    my $get_f;
    if( $on_chunk ) {
       $get_f = $self->_do_request( $request,
-         ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+         timeout       => $args{timeout},
+         stall_timeout => $args{stall_timeout},
          on_header => sub {
             my ( $header ) = @_;
             my $code = $header->code;
@@ -682,6 +700,23 @@ Each case is analogous to the types that the C<value> key can take.
 Optional. If provided, gives additional user metadata fields to set on the
 object, using the C<X-Amz-Meta-> fields.
 
+=item timeout => NUM
+
+Optional. For single-part uploads, this sets the C<timeout> argument to use
+for the actual C<PUT> request. For multi-part uploads, this argument is
+currently ignored.
+
+=item meta_timeout => NUM
+
+Optional. For multipart uploads, this sets the C<timeout> argument to use for
+the initiate and complete requests, overriding a configured C<timeout>.
+Ignored for single-part uploads.
+
+=item part_timeout => NUM
+
+Optional. For multipart uploads, this sets the C<timeout> argument to use for
+the individual part C<PUT> requests. Ignored for single-part uploads.
+
 =back
 
 The Future will return a single string containing the S3 ETag of the newly-set
@@ -699,22 +734,22 @@ will be returned if these do not match.
 
 sub _md5sum_wrap
 {
-   my ( $content, $md5ctx, $posref, $content_length, $read_size ) = @_;
+   my $content = shift;
+   my @args = my ( $md5ctx, $posref, $content_length, $read_size, $timer ) = @_;
 
-   if( !defined $content ) {
-      $content = "\0" x ( $content_length - $$posref );
-
-      $md5ctx->add( $content );
-      $$posref += length $content;
-
-      return $content;
-   }
-   elsif( !ref $content ) {
+   if( !defined $content or !ref $content ) {
       my $len = $content_length - $$posref;
-      substr( $content, $len ) = "" if length $content > $len;
+      if( defined $content ) {
+         substr( $content, $len ) = "" if length $content > $len;
+      }
+      else {
+         $content = "\0" x $len;
+      }
 
       $md5ctx->add( $content );
       $$posref += length $content;
+
+      $timer->reset if $timer;
 
       return $content;
    }
@@ -726,14 +761,14 @@ sub _md5sum_wrap
          $len = $read_size if $len > $read_size;
 
          my $chunk = $content->( $$posref, $len );
-         return _md5sum_wrap( $chunk, $md5ctx, $posref, $content_length, $read_size );
+         return _md5sum_wrap( $chunk, @args );
       }
    }
    elsif( blessed $content and $content->isa( "Future" ) ) {
       return $content->transform(
          done => sub {
             my ( $chunk ) = @_;
-            return _md5sum_wrap( $chunk, $md5ctx, $posref, $content_length, $read_size );
+            return _md5sum_wrap( $chunk, @args );
          },
       );
    }
@@ -766,11 +801,35 @@ sub _put_object
 
       my $pos = 0;
 
-      $self->_do_request( $request,
-         ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+      my $stall_timer;
+      my $timeout_f;
+      if( my $timeout = $args{stall_timeout} // $self->{stall_timeout} ) {
+         $timeout_f = $self->loop->new_future;
+         $stall_timer = IO::Async::Timer::Countdown->new(
+            delay => $timeout,
+            on_expire => sub {
+               my $self= shift;
+               $timeout_f->fail( "Stalled during PUT" );
+               $self->remove_from_parent;
+            }
+         );
+         $timeout_f->on_cancel( sub { $stall_timer->remove_from_parent });
+
+         $self->add_child( $stall_timer );
+         $stall_timer->start;
+      }
+
+      my $f = $self->_do_request( $request,
+         timeout       => $args{timeout},
+         stall_timeout => $args{stall_timeout},
          expect_continue => 1,
-         request_body => _md5sum_wrap( $content, $md5ctx, \$pos, $content_length, $self->{read_size} ),
-      )
+         request_body => _md5sum_wrap( $content, $md5ctx, \$pos, $content_length, $self->{read_size}, $stall_timer ),
+      );
+
+      $f->on_done( sub { $stall_timer->stop } ) if $stall_timer;
+
+      return $f unless $timeout_f;
+      return Future->wait_any( $f, $timeout_f );
    })->then( sub {
       my $resp = shift;
 
@@ -853,6 +912,7 @@ sub _put_object_multipart
    my @etags;
 
    $self->_retry( "_initiate_multipart_upload",
+      timeout => $args{meta_timeout} // $self->{timeout},
       %args
    )->then( sub {
       my ( $id ) = @_;
@@ -869,6 +929,7 @@ sub _put_object_multipart
                partNumber   => $part_num,
                uploadId     => $id,
             },
+            timeout      => $args{part_timeout},
             %moreargs,
          )->on_done( sub {
             my ( $etag ) = @_;
@@ -904,6 +965,7 @@ sub _put_object_multipart
          %args,
          id      => $id,
          content => $doc->toString,
+         timeout => $args{meta_timeout} // $self->{timeout},
       );
    });
 }
@@ -962,6 +1024,7 @@ sub put_object
             content        => $content,
             content_length => $content_length,
             meta           => $args{meta},
+            %args,
          );
       }
    });
@@ -1002,7 +1065,8 @@ sub _delete_object
    );
 
    $self->_do_request( $request,
-      ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+      timeout       => $args{timeout} // $self->{timeout},
+      stall_timeout => $args{stall_timeout},
    )->then( sub {
       return Future->new->done;
    });

@@ -18,11 +18,10 @@ my $loop = IO::Async::Loop->new;
 testing_loop( $loop );
 
 my $s3 = Net::Async::Webservice::S3->new(
+   max_retries => 1,
    http => my $http = TestHTTP->new,
    access_key => 'K'x20,
    secret_key => 's'x40,
-
-   max_retries => 1,
 );
 
 $loop->add( $s3 );
@@ -114,6 +113,38 @@ sub await_upload_and_respond
    is( $request->header( "X-Amz-Meta-A" ), "a", '$request has X-Amz-Meta-A header' );
 
    $f->get;
+}
+
+# Test that timeout argument is set only for direct argument
+{
+   my $f;
+   my $req;
+
+   $s3->configure( timeout => 10 );
+   $f = $s3->put_object(
+      bucket => "bucket",
+      key    => "-one-",
+      value  => "a value",
+   );
+
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
+
+   is( $req->header( "X-NaHTTP-Timeout" ), undef, 'Request has no timeout for configured' );
+   $http->respond( 200, "OK", [] );
+
+   $f = $s3->put_object(
+      bucket  => "bucket",
+      key     => "-one-",
+      value   => "a value",
+      timeout => 20,
+   );
+
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
+
+   is( $req->header( "X-NaHTTP-Timeout" ), 20, 'Request has timeout set for immediate' );
+   $http->respond( 200, "OK", [] );
 }
 
 done_testing;

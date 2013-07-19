@@ -83,4 +83,23 @@ EOF
    is( $count, 3, 'Attempted 3 times total' );
 }
 
+# HTTP 4xx errors should not be retried
+{
+   my $f = $s3->list_bucket(
+      bucket => "bucket",
+      prefix => "NOTHERE",
+      delimiter => "/",
+   );
+
+   wait_for { $http->pending_request };
+   $http->respond(
+      HTTP::Response->new( 404, "Not Found", [], "" )
+   );
+
+   ok( $f->is_ready, '$f is ready after single HTTP 404 failure' );
+   like( scalar $f->failure,
+         qr(^404 Not Found on GET / at ),
+         '$f->failure for HTTP 404 failure' );
+}
+
 done_testing;

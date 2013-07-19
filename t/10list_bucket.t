@@ -17,6 +17,7 @@ my $loop = IO::Async::Loop->new;
 testing_loop( $loop );
 
 my $s3 = Net::Async::Webservice::S3->new(
+   max_retries => 1,
    http => my $http = TestHTTP->new,
    access_key => 'K'x20,
    secret_key => 's'x40,
@@ -274,16 +275,30 @@ EOF
 
 # Test that timeout argument is set
 {
-   my $f = $s3->list_bucket(
+   my $f;
+   my $req;
+
+   $s3->configure( timeout => 10 );
+   $f = $s3->list_bucket(
+      delimiter => "/",
+   );
+
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
+
+   is( $req->header( "X-NaHTTP-Timeout" ), 10, 'Request has timeout set for configured' );
+   $http->respond( 200, "OK", [] );
+
+   $f = $s3->list_bucket(
       delimiter => "/",
       timeout => 20,
    );
 
-   my $req;
    wait_for { $req = $http->pending_request or $f->is_ready };
    $f->get if $f->is_ready and $f->failure;
 
-   is( $http->pending_timeout, 20, '$http->pending_timeout for timeout' );
+   is( $req->header( "X-NaHTTP-Timeout" ), 20, 'Request has timeout set for immediate' );
+   $http->respond( 200, "OK", [] );
 }
 
 done_testing;

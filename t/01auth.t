@@ -48,7 +48,8 @@ isa_ok( $s3, "Net::Async::Webservice::S3", '$s3' );
    );
 
    my $req;
-   wait_for { $req = $http->pending_request };
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
 
    is( $req->method, "GET", '$req->method' );
    is( $req->uri, "http://bucket.s3.amazonaws.com/?delimiter=%2F&max-keys=1000&prefix=", '$req->uri' );

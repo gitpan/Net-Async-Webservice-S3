@@ -12,8 +12,9 @@ WriteMakefile
                    'HTTP::Request' => 0,
                    'IO::Async::Stream' => '0.57',
                    'IO::Async::Test' => 0,
+                   'IO::Async::Timer::Countdown' => 0,
                    'MIME::Base64' => 0,
-                   'Net::Async::HTTP' => '0.26',
+                   'Net::Async::HTTP' => '0.27',
                    'Test::More' => '0.88',
                    'URI::Escape' => 0,
                    'XML::LibXML' => 0

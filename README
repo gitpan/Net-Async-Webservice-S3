@@ -90,11 +90,24 @@ PARAMETERS
     read_size => INT
             Optional. Size in bytes to read per call to the `$gen_value'
             content generation function in `put_object'. Defaults to 64 KiB.
+            Be aware that too large a value may lead to the `PUT' stall
+            timer failing to be invoked on slow enough connections, causing
+            spurious timeouts.
 
     timeout => NUM
+            Optional. If configured, this is passed into individual requests
+            of the underlying `Net::Async::HTTP' object, except for the
+            actual content `GET' or `PUT' operations. It is therefore used
+            by `list_bucket', `delete_object', and the multi-part metadata
+            operations used by `put_object'. To apply an overall timeout to
+            an individual `get_object' or `put_object' operation, pass a
+            specific `timeout' argument to those methods specifically.
+
     stall_timeout => NUM
-            Optional. If configured, these are passed into the underlying
-            `Net::Async::HTTP' object.
+            Optional. If configured, this is passed into the underlying
+            `Net::Async::HTTP' object and used for all download requests. It
+            is also used to implement stall timeout logic of content upload
+            during `PUT' requests.
 
 METHODS
     The following methods all support the following common arguments:
@@ -247,6 +260,22 @@ METHODS
     meta => HASH
             Optional. If provided, gives additional user metadata fields to
             set on the object, using the `X-Amz-Meta-' fields.
+
+    timeout => NUM
+            Optional. For single-part uploads, this sets the `timeout'
+            argument to use for the actual `PUT' request. For multi-part
+            uploads, this argument is currently ignored.
+
+    meta_timeout => NUM
+            Optional. For multipart uploads, this sets the `timeout'
+            argument to use for the initiate and complete requests,
+            overriding a configured `timeout'. Ignored for single-part
+            uploads.
+
+    part_timeout => NUM
+            Optional. For multipart uploads, this sets the `timeout'
+            argument to use for the individual part `PUT' requests. Ignored
+            for single-part uploads.
 
     The Future will return a single string containing the S3 ETag of the
     newly-set key. For single-part uploads this will be the MD5 sum in hex,

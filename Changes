@@ -1,5 +1,9 @@
 Revision history for Net-Async-Webservice-S3
 
+0.10    CHANGES:
+         * Much improved timeout logic, including stall timer for PUT
+         * Don't retry on HTTP 4xx errors, they should fail immediately
+
 0.09    CHANGES:
          * Add a small delay after failures before retrying, to let HTTP
            connections properly reset/recover
