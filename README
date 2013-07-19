@@ -91,7 +91,19 @@ PARAMETERS
             Optional. Size in bytes to read per call to the `$gen_value'
             content generation function in `put_object'. Defaults to 64 KiB.
 
+    timeout => NUM
+    stall_timeout => NUM
+            Optional. If configured, these are passed into the underlying
+            `Net::Async::HTTP' object.
+
 METHODS
+    The following methods all support the following common arguments:
+
+    timeout => NUM
+    stall_timeout => NUM
+            Optional. Passed directly to the underlying
+            `Net::Async::HTTP->request' method.
+
   $f = $s3->list_bucket( %args )
     Requests a list of the keys in a bucket, optionally within some prefix.
 

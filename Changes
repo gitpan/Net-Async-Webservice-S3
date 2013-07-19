@@ -1,5 +1,10 @@
 Revision history for Net-Async-Webservice-S3
 
+0.09    CHANGES:
+         * Add a small delay after failures before retrying, to let HTTP
+           connections properly reset/recover
+         * Pass through timeout and stall_timeout to underlying NaHTTP object
+
 0.08    CHANGES:
          * Optionally support SSL
          * Sanity-check bucket names that are used as DNS names

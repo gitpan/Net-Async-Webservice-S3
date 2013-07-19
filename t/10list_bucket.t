@@ -272,4 +272,18 @@ EOF
               'list_bucket keys' );
 }
 
+# Test that timeout argument is set
+{
+   my $f = $s3->list_bucket(
+      delimiter => "/",
+      timeout => 20,
+   );
+
+   my $req;
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
+
+   is( $http->pending_timeout, 20, '$http->pending_timeout for timeout' );
+}
+
 done_testing;

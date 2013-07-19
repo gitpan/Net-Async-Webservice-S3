@@ -10,6 +10,7 @@ my $pending_request;
 my $pending_response;
 my $pending_on_header;
 my $pending_on_chunk;
+my $pending_timeout;
 
 sub new { bless [], shift }
 
@@ -45,6 +46,7 @@ sub do_request
 
    $pending_request = delete $args{request};
    $pending_on_header = delete $args{on_header};
+   $pending_timeout = delete $args{timeout};
 
    if( my $request_body = delete $args{request_body} ) {
       _pull_content( $request_body, $pending_request );
@@ -52,6 +54,8 @@ sub do_request
 
    delete $args{expect_continue};
    delete $args{SSL};
+
+   delete $args{stall_timeout};
 
    die "TODO: more args: " . join( ", ", keys %args ) if keys %args;
 
@@ -61,6 +65,11 @@ sub do_request
 sub pending_request
 {
    return $pending_request;
+}
+
+sub pending_timeout
+{
+   return $pending_timeout;
 }
 
 sub respond

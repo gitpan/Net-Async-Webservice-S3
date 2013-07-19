@@ -9,7 +9,7 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.08';
+our $VERSION = '0.09';
 
 use Carp;
 
@@ -157,6 +157,13 @@ used. Defaults to 100 MiB.
 Optional. Size in bytes to read per call to the C<$gen_value> content
 generation function in C<put_object>. Defaults to 64 KiB.
 
+=item timeout => NUM
+
+=item stall_timeout => NUM
+
+Optional. If configured, these are passed into the underlying
+C<Net::Async::HTTP> object.
+
 =back
 
 =cut
@@ -171,10 +178,31 @@ sub configure
       exists $args{$_} and $self->{$_} = delete $args{$_};
    }
 
+   # Parameters shared by NaHTTP and locally
+   foreach (qw( timeout stall_timeout )) {
+      next unless exists $args{$_};
+
+      $self->{http}->configure( $_ => $args{$_} );
+      $self->{$_} = $args{$_};
+   }
+
    $self->SUPER::configure( %args );
 }
 
 =head1 METHODS
+
+The following methods all support the following common arguments:
+
+=over 8
+
+=item timeout => NUM
+
+=item stall_timeout => NUM
+
+Optional. Passed directly to the underlying C<< Net::Async::HTTP->request >>
+method.
+
+=back
 
 =cut
 
@@ -309,9 +337,9 @@ sub _do_request
 sub _do_request_xpc
 {
    my $self = shift;
-   my ( $request ) = @_;
+   my ( $request, @args ) = @_;
 
-   $self->_do_request( $request )->then( sub {
+   $self->_do_request( $request, @args )->then( sub {
       my $resp = shift;
 
       my $xpc = XML::LibXML::XPathContext->new( $libxml->parse_string( $resp->content ) );
@@ -326,9 +354,18 @@ sub _retry
    my $self = shift;
    my ( $method, @args ) = @_;
 
+   my $delay = 0.5;
+
    my $retries = $self->{max_retries};
    repeat {
-      $self->$method( @args )
+      my ( $prev_f ) = @_;
+
+      # Add a small delay after failure before retrying
+      my $delay_f =
+         $prev_f ? $self->loop->delay_future( after => ( $delay *= 2 ) )
+                 : Future->new->done;
+
+      $delay_f->then( sub { $self->$method( @args ) } );
    } while => sub { shift->failure and --$retries },
      return => $self->loop->new_future;
 }
@@ -417,7 +454,9 @@ sub _list_bucket
          content      => "",
       );
 
-      $self->_do_request_xpc( $req )->then( sub {
+      $self->_do_request_xpc( $req,
+         ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+      )->then( sub {
          my $xpc = shift;
 
          my $last_key;
@@ -520,6 +559,7 @@ sub _get_object
    my $get_f;
    if( $on_chunk ) {
       $get_f = $self->_do_request( $request,
+         ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
          on_header => sub {
             my ( $header ) = @_;
             my $code = $header->code;
@@ -532,7 +572,9 @@ sub _get_object
       );
    }
    else {
-      $get_f = $self->_do_request( $request );
+      $get_f = $self->_do_request( $request,
+         ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+      );
    }
 
    return $get_f->then( sub {
@@ -725,6 +767,7 @@ sub _put_object
       my $pos = 0;
 
       $self->_do_request( $request,
+         ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
          expect_continue => 1,
          request_body => _md5sum_wrap( $content, $md5ctx, \$pos, $content_length, $self->{read_size} ),
       )
@@ -763,7 +806,9 @@ sub _initiate_multipart_upload
       meta    => $args{meta},
    );
 
-   $self->_do_request_xpc( $req )->then( sub {
+   $self->_do_request_xpc( $req,
+      ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+   )->then( sub {
       my $xpc = shift;
 
       my $id = $xpc->findvalue( ".//s3:InitiateMultipartUploadResult/s3:UploadId" );
@@ -790,7 +835,9 @@ sub _complete_multipart_upload
       },
    );
 
-   $self->_do_request_xpc( $req )->then( sub {
+   $self->_do_request_xpc( $req,
+      ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+   )->then( sub {
       my $xpc = shift;
 
       my $etag = $xpc->findvalue( ".//s3:CompleteMultipartUploadResult/s3:ETag" );
@@ -954,7 +1001,9 @@ sub _delete_object
       content => "",
    );
 
-   $self->_do_request( $request )->then( sub {
+   $self->_do_request( $request,
+      ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+   )->then( sub {
       return Future->new->done;
    });
 }
