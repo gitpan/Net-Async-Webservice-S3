@@ -4,7 +4,7 @@
       "Paul Evans <leonerd@leonerd.org.uk>"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "Module::Build version 0.4005, CPAN::Meta::Converter version 2.120921",
+   "generated_by" : "Module::Build version 0.4007, CPAN::Meta::Converter version 2.132140",
    "license" : [
       "perl_5"
    ],
@@ -27,7 +27,7 @@
          "requires" : {
             "Digest::HMAC_SHA1" : "0",
             "Digest::MD5" : "0",
-            "Future" : "0.14",
+            "Future" : "0.16",
             "HTTP::Date" : "0",
             "HTTP::Request" : "0",
             "IO::Async::Stream" : "0.57",
@@ -42,7 +42,7 @@
    "provides" : {
       "Net::Async::Webservice::S3" : {
          "file" : "lib/Net/Async/Webservice/S3.pm",
-         "version" : "0.10"
+         "version" : "0.11"
       }
    },
    "release_status" : "stable",
@@ -51,5 +51,5 @@
          "http://dev.perl.org/licenses/"
       ]
    },
-   "version" : "0.10"
+   "version" : "0.11"
 }

@@ -1,5 +1,12 @@
 Revision history for Net-Async-Webservice-S3
 
+0.11    2013/09/05 16:29:07
+        [CHANGES]
+         * Configurable hostname for S3 service - allows use of other service
+           providers
+         * More succinct documentation of Future-returning methods to include
+           the Future yield values in the =head2 line itself
+
 0.10    CHANGES:
          * Much improved timeout logic, including stall timer for PUT
          * Don't retry on HTTP 4xx errors, they should fail immediately

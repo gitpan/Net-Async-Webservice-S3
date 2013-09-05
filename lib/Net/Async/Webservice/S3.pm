@@ -9,14 +9,14 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.10';
+our $VERSION = '0.11';
 
 use Carp;
 
 use Digest::HMAC_SHA1;
 use Digest::MD5 qw( md5 );
 use Future 0.14; # ->then, ->wrap
-use Future::Utils qw( repeat );
+use Future::Utils 0.16 qw( repeat );
 use HTTP::Date qw( time2str );
 use HTTP::Request;
 use IO::Async::Timer::Countdown;
@@ -27,6 +27,8 @@ use XML::LibXML;
 use XML::LibXML::XPathContext;
 
 my $libxml = XML::LibXML->new;
+
+use constant DEFAULT_S3_HOST => "s3.amazonaws.com";
 
 =head1 NAME
 
@@ -89,6 +91,8 @@ sub _init
    # document what size of parts to use, but we'll use that again.
    $args->{part_size} //= 100*1024*1024;
 
+   $args->{host} //= DEFAULT_S3_HOST;
+
    return $self->SUPER::_init( @_ );
 }
 
@@ -137,6 +141,12 @@ to keep operations of the object contained within the named key space. If this
 string is supplied, don't forget that it should end with the path delimiter in
 use by the key naming scheme (for example C</>).
 
+=item host => STRING
+
+Optional. Sets the hostname to talk to the S3 service. Usually the default of
+C<s3.amazonaws.com> is sufficient. This setting allows for communication with
+other service providers who provide the same API as S3.
+
 =item max_retries => INT
 
 Optional. Maximum number of times to retry a failed operation. Defaults to 3.
@@ -184,7 +194,7 @@ sub configure
    my $self = shift;
    my %args = @_;
 
-   foreach (qw( http access_key secret_key ssl bucket prefix max_retries
+   foreach (qw( http access_key secret_key ssl bucket prefix host max_retries
                 list_max_keys part_size read_size timeout )) {
       exists $args{$_} and $self->{$_} = delete $args{$_};
    }
@@ -215,6 +225,13 @@ method.
 
 =back
 
+Each method below that yields a C<Future> is documented in the form
+
+ $s3->METHOD( ARGS ) ==> YIELDS
+
+Where the C<YIELDS> part indicates the values that will eventually be returned
+by the C<get> method on the returned Future object, if it succeeds.
+
 =cut
 
 sub _make_request
@@ -239,10 +256,10 @@ sub _make_request
 
    my $uri;
    if( length $bucket <= 63 and $bucket =~ m{^[A-Z0-9][A-Z0-9.-]+$}i ) {
-      $uri = "$scheme://$bucket.s3.amazonaws.com/$path";
+      $uri = "$scheme://$bucket.$self->{host}/$path";
    }
    else {
-      $uri = "$scheme://s3.amazonaws.com/$bucket/$path";
+      $uri = "$scheme://$self->{host}/$bucket/$path";
    }
    $uri .= "?" . join( "&", @params ) if @params;
 
@@ -382,11 +399,10 @@ sub _retry
       my ( $failure, $request, $response ) = $f->failure or return 0; # success
       return 0 if $response and $response->code =~ m/^4/; # don't retry HTTP 4xx
       return --$retries;
-   },
-     return => $self->loop->new_future;
+   };
 }
 
-=head2 $f = $s3->list_bucket( %args )
+=head2 $s3->list_bucket( %args ) ==> ( $keys, $prefixes )
 
 Requests a list of the keys in a bucket, optionally within some prefix.
 
@@ -411,8 +427,6 @@ key space beginning with the given prefix will be queried.
 The Future will return two ARRAY references. The first provides a list of the
 keys found within the given prefix, and the second will return a list of the
 common prefixes of further nested keys.
-
- ( $keys, $prefixes ) = $f->get
 
 Each key in the C<$keys> list is given in a HASH reference containing
 
@@ -505,8 +519,7 @@ sub _list_bucket
       });
    } while => sub {
       my $f = shift;
-      !$f->failure and $f->get },
-   return => $self->loop->new_future;
+      !$f->failure and $f->get };
 
    $f->then( sub {
       return Future->wrap( \@keys, \@prefixes );
@@ -519,7 +532,7 @@ sub list_bucket
    $self->_retry( "_list_bucket", @_ );
 }
 
-=head2 $f = $s3->get_object( %args )
+=head2 $s3->get_object( %args ) ==> ( $value, $response, $meta )
 
 Requests the value of a key from a bucket.
 
@@ -551,11 +564,8 @@ final result of the Future will be an empty string.
 
 The Future will return a byte string containing the key's value, the
 L<HTTP::Response> that was received, and a hash reference containing any of
-the metadata fields, if found in the response.
-
- ( $value, $response, $meta ) = $f->get;
-
-If an C<on_chunk> code reference is passed, this string will be empty.
+the metadata fields, if found in the response. If an C<on_chunk> code
+reference is passed, the C<$value> string will be empty.
 
 =cut
 
@@ -611,7 +621,7 @@ sub get_object
    $self->_retry( "_get_object", @_, method => "GET" );
 }
 
-=head2 $f = $s3->head_object( %args )
+=head2 $s3->head_object( %args ) ==> ( $response, $meta )
 
 Requests the value metadata of a key from a bucket. This is similar to the
 C<get_object> method, but uses the C<HEAD> HTTP verb instead of C<GET>.
@@ -622,8 +632,6 @@ C<on_chunk> callback, if provided.
 The Future will return the L<HTTP::Response> object and metadata hash
 reference, without the content string (as no content is returned to a C<HEAD>
 request).
-
- ( $response, $meta ) = $f->get;
 
 =cut
 
@@ -636,7 +644,7 @@ sub head_object
    });
 }
 
-=head2 $f = $s3->put_object( %args )
+=head2 $s3->put_object( %args ) ==> ( $etag )
 
 Sets a new value for a key in the bucket.
 
@@ -723,8 +731,6 @@ The Future will return a single string containing the S3 ETag of the newly-set
 key. For single-part uploads this will be the MD5 sum in hex, surrounded by
 quote marks. For multi-part uploads this is a string in a different form,
 though details of its generation are not specified by S3.
-
- ( $etag ) = $f->get
 
 The returned MD5 sum from S3 during upload will be checked against an
 internally-generated MD5 sum of the content that was sent, and an error result
@@ -945,7 +951,7 @@ sub _put_object_multipart
          !$_[0]->failure;
       }, otherwise => sub {
          return Future->wrap( $id, @etags );
-      }, return => $self->loop->new_future;
+      };
    })->then( sub {
       my ( $id, @etags ) = @_;
 
@@ -1030,7 +1036,7 @@ sub put_object
    });
 }
 
-=head2 $f = $s3->delete_object( %args )
+=head2 $s3->delete_object( %args ) ==> ()
 
 Deletes a key from the bucket.
 

@@ -72,6 +72,12 @@ PARAMETERS
             supplied, don't forget that it should end with the path
             delimiter in use by the key naming scheme (for example `/').
 
+    host => STRING
+            Optional. Sets the hostname to talk to the S3 service. Usually
+            the default of `s3.amazonaws.com' is sufficient. This setting
+            allows for communication with other service providers who
+            provide the same API as S3.
+
     max_retries => INT
             Optional. Maximum number of times to retry a failed operation.
             Defaults to 3.
@@ -117,7 +123,15 @@ METHODS
             Optional. Passed directly to the underlying
             `Net::Async::HTTP->request' method.
 
-  $f = $s3->list_bucket( %args )
+    Each method below that yields a `Future' is documented in the form
+
+     $s3->METHOD( ARGS ) ==> YIELDS
+
+    Where the `YIELDS' part indicates the values that will eventually be
+    returned by the `get' method on the returned Future object, if it
+    succeeds.
+
+  $s3->list_bucket( %args ) ==> ( $keys, $prefixes )
     Requests a list of the keys in a bucket, optionally within some prefix.
 
     Takes the following named arguments:
@@ -135,8 +149,6 @@ METHODS
     The Future will return two ARRAY references. The first provides a list
     of the keys found within the given prefix, and the second will return a
     list of the common prefixes of further nested keys.
-
-     ( $keys, $prefixes ) = $f->get
 
     Each key in the `$keys' list is given in a HASH reference containing
 
@@ -157,7 +169,7 @@ METHODS
 
     Each key in the `$prefixes' list is given as a plain string.
 
-  $f = $s3->get_object( %args )
+  $s3->get_object( %args ) ==> ( $value, $response, $meta )
     Requests the value of a key from a bucket.
 
     Takes the following named arguments:
@@ -183,13 +195,10 @@ METHODS
 
     The Future will return a byte string containing the key's value, the
     HTTP::Response that was received, and a hash reference containing any of
-    the metadata fields, if found in the response.
+    the metadata fields, if found in the response. If an `on_chunk' code
+    reference is passed, the `$value' string will be empty.
 
-     ( $value, $response, $meta ) = $f->get;
-
-    If an `on_chunk' code reference is passed, this string will be empty.
-
-  $f = $s3->head_object( %args )
+  $s3->head_object( %args ) ==> ( $response, $meta )
     Requests the value metadata of a key from a bucket. This is similar to
     the `get_object' method, but uses the `HEAD' HTTP verb instead of `GET'.
 
@@ -200,9 +209,7 @@ METHODS
     reference, without the content string (as no content is returned to a
     `HEAD' request).
 
-     ( $response, $meta ) = $f->get;
-
-  $f = $s3->put_object( %args )
+  $s3->put_object( %args ) ==> ( $etag )
     Sets a new value for a key in the bucket.
 
     Takes the following named arguments:
@@ -283,13 +290,11 @@ METHODS
     different form, though details of its generation are not specified by
     S3.
 
-     ( $etag ) = $f->get
-
     The returned MD5 sum from S3 during upload will be checked against an
     internally-generated MD5 sum of the content that was sent, and an error
     result will be returned if these do not match.
 
-  $f = $s3->delete_object( %args )
+  $s3->delete_object( %args ) ==> ()
     Deletes a key from the bucket.
 
     Takes the following named arguments:
