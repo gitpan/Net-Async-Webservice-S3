@@ -33,7 +33,7 @@
             "IO::Async::Stream" : "0.57",
             "IO::Async::Timer::Countdown" : "0",
             "MIME::Base64" : "0",
-            "Net::Async::HTTP" : "0.27",
+            "Net::Async::HTTP" : "0.28",
             "URI::Escape" : "0",
             "XML::LibXML" : "0"
          }
@@ -42,7 +42,7 @@
    "provides" : {
       "Net::Async::Webservice::S3" : {
          "file" : "lib/Net/Async/Webservice/S3.pm",
-         "version" : "0.11"
+         "version" : "0.12"
       }
    },
    "release_status" : "stable",
@@ -51,5 +51,5 @@
          "http://dev.perl.org/licenses/"
       ]
    },
-   "version" : "0.11"
+   "version" : "0.12"
 }

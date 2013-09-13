@@ -1,5 +1,10 @@
 Revision history for Net-Async-Webservice-S3
 
+0.12    2013/09/14 00:03:53
+        [CHANGES]
+         * Use Net::Async::HTTP 0.28 so the stall_timeout logic works during
+           write; can avoid having custom handling for it now
+
 0.11    2013/09/05 16:29:07
         [CHANGES]
          * Configurable hostname for S3 service - allows use of other service

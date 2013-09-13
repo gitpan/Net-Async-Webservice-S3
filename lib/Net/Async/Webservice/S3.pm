@@ -9,7 +9,7 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 
 use Carp;
 
@@ -77,7 +77,7 @@ sub _init
 
    $args->{http} ||= do {
       require Net::Async::HTTP;
-      Net::Async::HTTP->VERSION( '0.27' ); # Futures, ->cancel
+      Net::Async::HTTP->VERSION( '0.28' ); # stall_timeout on write
       my $http = Net::Async::HTTP->new;
       $self->add_child( $http );
       $http;
@@ -182,8 +182,7 @@ pass a specific C<timeout> argument to those methods specifically.
 =item stall_timeout => NUM
 
 Optional. If configured, this is passed into the underlying
-C<Net::Async::HTTP> object and used for all download requests. It is also used
-to implement stall timeout logic of content upload during C<PUT> requests.
+C<Net::Async::HTTP> object and used for all content uploads and downloads.
 
 =back
 
@@ -204,7 +203,6 @@ sub configure
       next unless exists $args{$_};
 
       $self->{http}->configure( $_ => $args{$_} );
-      $self->{$_} = delete $args{$_};
    }
 
    $self->SUPER::configure( %args );
@@ -741,7 +739,7 @@ will be returned if these do not match.
 sub _md5sum_wrap
 {
    my $content = shift;
-   my @args = my ( $md5ctx, $posref, $content_length, $read_size, $timer ) = @_;
+   my @args = my ( $md5ctx, $posref, $content_length, $read_size ) = @_;
 
    if( !defined $content or !ref $content ) {
       my $len = $content_length - $$posref;
@@ -754,8 +752,6 @@ sub _md5sum_wrap
 
       $md5ctx->add( $content );
       $$posref += length $content;
-
-      $timer->reset if $timer;
 
       return $content;
    }
@@ -807,35 +803,12 @@ sub _put_object
 
       my $pos = 0;
 
-      my $stall_timer;
-      my $timeout_f;
-      if( my $timeout = $args{stall_timeout} // $self->{stall_timeout} ) {
-         $timeout_f = $self->loop->new_future;
-         $stall_timer = IO::Async::Timer::Countdown->new(
-            delay => $timeout,
-            on_expire => sub {
-               my $self= shift;
-               $timeout_f->fail( "Stalled during PUT" );
-               $self->remove_from_parent;
-            }
-         );
-         $timeout_f->on_cancel( sub { $stall_timer->remove_from_parent });
-
-         $self->add_child( $stall_timer );
-         $stall_timer->start;
-      }
-
-      my $f = $self->_do_request( $request,
+      $self->_do_request( $request,
          timeout       => $args{timeout},
          stall_timeout => $args{stall_timeout},
          expect_continue => 1,
-         request_body => _md5sum_wrap( $content, $md5ctx, \$pos, $content_length, $self->{read_size}, $stall_timer ),
+         request_body => _md5sum_wrap( $content, $md5ctx, \$pos, $content_length, $self->{read_size} ),
       );
-
-      $f->on_done( sub { $stall_timer->stop } ) if $stall_timer;
-
-      return $f unless $timeout_f;
-      return Future->wait_any( $f, $timeout_f );
    })->then( sub {
       my $resp = shift;
 
