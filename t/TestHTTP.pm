@@ -8,6 +8,7 @@ use Scalar::Util qw( blessed );
 
 my $pending_request;
 my $pending_request_content;
+my $pending_request_on_write;
 my $pending_response;
 my $pending_on_header;
 my $pending_on_chunk;
@@ -20,6 +21,7 @@ sub _pull_content
 
    if( !ref $content ) {
       $request->add_content( $content );
+      $pending_request_on_write->( length $content ) if $pending_request_on_write;
    }
    elsif( ref $content eq "CODE" ) {
       while( defined( my $chunk = $content->() ) ) {
@@ -46,6 +48,12 @@ sub do_request
 
    $pending_request = delete $args{request};
    $pending_request_content = delete $args{request_body};
+   if( my $on_body_write = delete $args{on_body_write} ) {
+      my $written = 0;
+      $pending_request_on_write = sub {
+         $on_body_write->( $written += $_[0] );
+      };
+   }
    $pending_on_header = delete $args{on_header};
    if( my $timeout = delete $args{timeout} ) {
       # Cheat - easier for the unit tests to find it here

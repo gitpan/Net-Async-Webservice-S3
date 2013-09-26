@@ -117,10 +117,12 @@ EOF
 {
    my @parts = ( "The first part", "The second part" );
 
+   my @written;
    my $f = $s3->put_object(
       bucket => "bucket",
       key    => "four",
       gen_parts => sub { return unless @parts; shift @parts },
+      on_write => sub { push @written, $_[0] },
    );
    $f->on_fail( sub { die @_ } );
 
@@ -135,8 +137,12 @@ EOF
 
    wait_for { $f->is_ready };
 
-   my ( $etag ) = $f->get;
+   my ( $etag, $len ) = $f->get;
    is( $etag, '"3858f62230ac3c915f300c664312c11f-2"', 'result of multipart put' );
+   is( $len, 29, '$length of multipart put' );
+
+   is_deeply( \@written,
+              [ 14, 14+15 ], 'on_write invoked on each chunk with total' );
 }
 
 # Multipart put from Future
@@ -166,7 +172,8 @@ EOF
 
    wait_for { $f->is_ready };
 
-   $f->get;
+   my ( $etag, $len ) = $f->get;
+   is( $len, 28, '$length from multipart put from Future' );
 }
 
 # Multipart put from CODE/size pairs
@@ -193,7 +200,8 @@ EOF
 
    wait_for { $f->is_ready };
 
-   $f->get;
+   my ( $etag, $len ) = $f->get;
+   is( $len, 25, '$length from multipart put from CODE' );
 }
 
 # Multipart put from value automatically split
@@ -247,6 +255,32 @@ EOF
    }
 
    await_multipart_complete_and_respond "FOUR";
+
+   wait_for { $f->is_ready };
+   $f->get;
+}
+
+# Multipart put with no actual parts
+{
+   my $f = $s3->put_object(
+      bucket => "bucket",
+      key    => "FIVE",
+      gen_parts => sub { () },
+   );
+   $f->on_fail( sub { die @_ } );
+
+   my $req;
+   wait_for { $req = $http->pending_request };
+
+   is( $req->method, "PUT" );
+
+   my $md5 = md5_hex( $req->content );
+
+   $http->respond(
+      HTTP::Response->new( 200, "OK", [
+            ETag => qq("$md5"),
+         ], "" )
+   );
 
    wait_for { $f->is_ready };
    $f->get;

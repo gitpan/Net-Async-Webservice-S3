@@ -1,5 +1,16 @@
 Revision history for Net-Async-Webservice-S3
 
+0.13    2013/09/26 21:02:25
+        [CHANGES]
+         * Added 'on_write' callback parameter to ->put_object
+         * Pass 'stall_timeout' to ->do_request rather than ->configure'ing it
+           on the NaHTTP object; reducing the API surface
+         * Yield total generated content length from ->put_object result
+
+        [BUGFIXES]
+         * Ensure that a 'multipart' put of no parts creates an empty object
+           instead of failing
+
 0.12    2013/09/14 00:03:53
         [CHANGES]
          * Use Net::Async::HTTP 0.28 so the stall_timeout logic works during

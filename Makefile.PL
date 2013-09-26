@@ -7,14 +7,14 @@ WriteMakefile
   'PREREQ_PM' => {
                    'Digest::HMAC_SHA1' => 0,
                    'Digest::MD5' => 0,
-                   'Future' => '0.16',
+                   'Future' => '0.18',
                    'HTTP::Date' => 0,
                    'HTTP::Request' => 0,
                    'IO::Async::Stream' => '0.57',
                    'IO::Async::Test' => 0,
                    'IO::Async::Timer::Countdown' => 0,
                    'MIME::Base64' => 0,
-                   'Net::Async::HTTP' => '0.28',
+                   'Net::Async::HTTP' => '0.29',
                    'Test::More' => '0.88',
                    'URI::Escape' => 0,
                    'XML::LibXML' => 0

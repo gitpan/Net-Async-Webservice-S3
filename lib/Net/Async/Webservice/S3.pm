@@ -9,13 +9,13 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.12';
+our $VERSION = '0.13';
 
 use Carp;
 
 use Digest::HMAC_SHA1;
 use Digest::MD5 qw( md5 );
-use Future 0.14; # ->then, ->wrap
+use Future 0.18; # ->wrap, bugfgix to fmap* on immediates
 use Future::Utils 0.16 qw( repeat );
 use HTTP::Date qw( time2str );
 use HTTP::Request;
@@ -77,7 +77,7 @@ sub _init
 
    $args->{http} ||= do {
       require Net::Async::HTTP;
-      Net::Async::HTTP->VERSION( '0.28' ); # stall_timeout on write
+      Net::Async::HTTP->VERSION( '0.29' ); # on_body_write
       my $http = Net::Async::HTTP->new;
       $self->add_child( $http );
       $http;
@@ -194,15 +194,8 @@ sub configure
    my %args = @_;
 
    foreach (qw( http access_key secret_key ssl bucket prefix host max_retries
-                list_max_keys part_size read_size timeout )) {
+                list_max_keys part_size read_size timeout stall_timeout )) {
       exists $args{$_} and $self->{$_} = delete $args{$_};
-   }
-
-   # Parameters shared by NaHTTP and locally
-   foreach (qw( stall_timeout )) {
-      next unless exists $args{$_};
-
-      $self->{http}->configure( $_ => $args{$_} );
    }
 
    $self->SUPER::configure( %args );
@@ -484,7 +477,7 @@ sub _list_bucket
 
       $self->_do_request_xpc( $req,
          timeout       => $args{timeout} // $self->{timeout},
-         stall_timeout => $args{stall_timeout},
+         stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
       )->then( sub {
          my $xpc = shift;
 
@@ -585,7 +578,7 @@ sub _get_object
    if( $on_chunk ) {
       $get_f = $self->_do_request( $request,
          timeout       => $args{timeout},
-         stall_timeout => $args{stall_timeout},
+         stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
          on_header => sub {
             my ( $header ) = @_;
             my $code = $header->code;
@@ -599,7 +592,8 @@ sub _get_object
    }
    else {
       $get_f = $self->_do_request( $request,
-         ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+         timeout       => $args{timeout},
+         stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
       );
    }
 
@@ -642,7 +636,7 @@ sub head_object
    });
 }
 
-=head2 $s3->put_object( %args ) ==> ( $etag )
+=head2 $s3->put_object( %args ) ==> ( $etag, $length )
 
 Sets a new value for a key in the bucket.
 
@@ -723,10 +717,24 @@ Ignored for single-part uploads.
 Optional. For multipart uploads, this sets the C<timeout> argument to use for
 the individual part C<PUT> requests. Ignored for single-part uploads.
 
+=item on_write => CODE
+
+Optional. If provided, this code will be invoked after each successful
+C<syswrite> call on the underlying filehandle, indicating that the data was at
+least written as far as the kernel. It will be passed the total byte length
+that has been written for this call to C<put_object>.
+
+ $on_write->( $written )
+
+Note that because of retries it is possible this count will decrease, if a
+part has to be retried due to e.g. a failing MD5 checksum.
+
 =back
 
-The Future will return a single string containing the S3 ETag of the newly-set
-key. For single-part uploads this will be the MD5 sum in hex, surrounded by
+The Future will return a string containing the S3 ETag of the newly-set key,
+and the length of the value in bytes.
+
+For single-part uploads the ETag will be the MD5 sum in hex, surrounded by
 quote marks. For multi-part uploads this is a string in a different form,
 though details of its generation are not specified by S3.
 
@@ -785,6 +793,9 @@ sub _put_object
    my %args = @_;
 
    my $md5ctx = Digest::MD5->new;
+   my $on_write = $args{on_write};
+   my $on_write_offset = $args{on_write_offset} // 0;
+   my $pos = 0;
 
    # Make $content definitely a Future
    Future->wrap( delete $args{content} )->then( sub {
@@ -801,13 +812,14 @@ sub _put_object
       $request->content_length( $content_length );
       $request->content( "" );
 
-      my $pos = 0;
-
       $self->_do_request( $request,
          timeout       => $args{timeout},
-         stall_timeout => $args{stall_timeout},
+         stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
          expect_continue => 1,
          request_body => _md5sum_wrap( $content, $md5ctx, \$pos, $content_length, $self->{read_size} ),
+         $on_write ? ( on_body_write => sub {
+            $on_write->( $_[0] + $on_write_offset );
+         } ) : (),
       );
    })->then( sub {
       my $resp = shift;
@@ -827,7 +839,7 @@ sub _put_object
          return Future->new->die( "Returned MD5 hash ($got_md5) did not match expected ($expect_md5)", $resp );
       }
 
-      return Future->wrap( $etag );
+      return Future->wrap( $etag, $pos );
    });
 }
 
@@ -845,7 +857,8 @@ sub _initiate_multipart_upload
    );
 
    $self->_do_request_xpc( $req,
-      ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+      timeout       => $args{timeout},
+      stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
    )->then( sub {
       my $xpc = shift;
 
@@ -874,7 +887,8 @@ sub _complete_multipart_upload
    );
 
    $self->_do_request_xpc( $req,
-      ( map { $_ => $args{$_} } qw( timeout stall_timeout ) ),
+      timeout       => $args{timeout},
+      stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
    )->then( sub {
       my $xpc = shift;
 
@@ -888,6 +902,8 @@ sub _put_object_multipart
    my $self = shift;
    my ( $gen_parts, %args ) = @_;
 
+   my $on_write = $args{on_write};
+
    my @etags;
 
    $self->_retry( "_initiate_multipart_upload",
@@ -897,6 +913,7 @@ sub _put_object_multipart
       my ( $id ) = @_;
 
       my $part_num = 0;
+      my $total_len = 0;
       repeat {
          my ( $part_num, $content, %moreargs ) = @{$_[0]};
 
@@ -909,10 +926,13 @@ sub _put_object_multipart
                uploadId     => $id,
             },
             timeout      => $args{part_timeout},
+            on_write     => $on_write,
+            on_write_offset => $total_len,
             %moreargs,
          )->on_done( sub {
-            my ( $etag ) = @_;
+            my ( $etag, $len ) = @_;
             push @etags, [ $part_num, $etag ];
+            $total_len += $len;
          })
       } generate => sub {
          my @content = $gen_parts->() or return;
@@ -923,16 +943,16 @@ sub _put_object_multipart
       }, while => sub {
          !$_[0]->failure;
       }, otherwise => sub {
-         return Future->wrap( $id, @etags );
+         return Future->wrap( $id, \@etags, $total_len );
       };
    })->then( sub {
-      my ( $id, @etags ) = @_;
+      my ( $id, $etags, $len ) = @_;
 
       my $doc = XML::LibXML::Document->new( "1.0", "UTF-8" );
       $doc->addChild( my $root = $doc->createElement( "CompleteMultipartUpload" ) );
 
       #add content
-      foreach ( @etags ) {
+      foreach ( @$etags ) {
          my ( $part_num, $etag ) = @$_;
 
          $root->addChild( my $part = $doc->createElement('Part') );
@@ -945,7 +965,10 @@ sub _put_object_multipart
          id      => $id,
          content => $doc->toString,
          timeout => $args{meta_timeout} // $self->{timeout},
-      );
+      )->then( sub {
+         my ( $etag ) = @_;
+         return Future->wrap( $etag, $len );
+      });
    });
 }
 
@@ -981,13 +1004,9 @@ sub put_object
    my @parts;
    push @parts, [ $gen_parts->() ];
 
-   # Ensure first part is a Future
-   blessed $parts[0][0] and $parts[0][0]->isa( "Future" ) or
-      $parts[0][0] = $self->loop->new_future->done( $parts[0][0] );
-
-   $parts[0][0]->then( sub {
-      # unfuture it
-      ( $parts[0][0] ) = @_;
+   # Ensure first part is a Future then unfuture it
+   Future->wrap( @{$parts[0]} )->then( sub {
+      @{$parts[0]} = @_ if @_;
 
       push @parts, [ $gen_parts->() ];
 
@@ -995,7 +1014,8 @@ sub put_object
          # There are at least two parts; we'd better use multipart upload
          $self->_put_object_multipart( sub { @parts ? @{ shift @parts } : goto &$gen_parts }, %args );
       }
-      else {
+      elsif( @{ $parts[0] } ) {
+         # There is exactly one part
          my ( $content, $content_length ) = @{ shift @parts };
          $self->_retry( "_put_object",
             bucket         => $args{bucket},
@@ -1003,6 +1023,16 @@ sub put_object
             content        => $content,
             content_length => $content_length,
             meta           => $args{meta},
+            %args,
+         );
+      }
+      else {
+         # There are no parts at all - create an empty object
+         $self->_retry( "_put_object",
+            bucket  => $args{bucket},
+            path    => $args{key},
+            content => "",
+            meta    => $args{meta},
             %args,
          );
       }
@@ -1045,7 +1075,7 @@ sub _delete_object
 
    $self->_do_request( $request,
       timeout       => $args{timeout} // $self->{timeout},
-      stall_timeout => $args{stall_timeout},
+      stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
    )->then( sub {
       return Future->new->done;
    });

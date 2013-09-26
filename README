@@ -208,7 +208,7 @@ METHODS
     reference, without the content string (as no content is returned to a
     `HEAD' request).
 
-  $s3->put_object( %args ) ==> ( $etag )
+  $s3->put_object( %args ) ==> ( $etag, $length )
     Sets a new value for a key in the bucket.
 
     Takes the following named arguments:
@@ -283,11 +283,25 @@ METHODS
             argument to use for the individual part `PUT' requests. Ignored
             for single-part uploads.
 
-    The Future will return a single string containing the S3 ETag of the
-    newly-set key. For single-part uploads this will be the MD5 sum in hex,
-    surrounded by quote marks. For multi-part uploads this is a string in a
-    different form, though details of its generation are not specified by
-    S3.
+    on_write => CODE
+            Optional. If provided, this code will be invoked after each
+            successful `syswrite' call on the underlying filehandle,
+            indicating that the data was at least written as far as the
+            kernel. It will be passed the total byte length that has been
+            written for this call to `put_object'.
+
+             $on_write->( $written )
+
+            Note that because of retries it is possible this count will
+            decrease, if a part has to be retried due to e.g. a failing MD5
+            checksum.
+
+    The Future will return a string containing the S3 ETag of the newly-set
+    key, and the length of the value in bytes.
+
+    For single-part uploads the ETag will be the MD5 sum in hex, surrounded
+    by quote marks. For multi-part uploads this is a string in a different
+    form, though details of its generation are not specified by S3.
 
     The returned MD5 sum from S3 during upload will be checked against an
     internally-generated MD5 sum of the content that was sent, and an error

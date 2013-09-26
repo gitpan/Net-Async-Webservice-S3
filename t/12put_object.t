@@ -51,10 +51,12 @@ sub await_upload_and_respond
 
 # Single PUT from string
 {
+   my $written;
    my $f = $s3->put_object(
       bucket => "bucket",
       key    => "one",
       value  => "a new value",
+      on_write => sub { ( $written ) = @_; },
    );
    $f->on_fail( sub { die @_ } );
 
@@ -62,8 +64,11 @@ sub await_upload_and_respond
 
    wait_for { $f->is_ready };
 
-   my ( $etag ) = $f->get;
+   my ( $etag, $len ) = $f->get;
    is( $etag, '"895feaa3ad7b47130e2314bd88cab3b0"', 'result of simple put' );
+   is( $len, 11, '$length of simple put' );
+
+   is( $written, 11, 'on_write indicated 11 bytes total' );
 }
 
 # Single PUT from Future
@@ -79,7 +84,8 @@ sub await_upload_and_respond
 
    await_upload_and_respond "two", "Deferred content that came later";
 
-   $f->get;
+   my ( $etag, $len ) = $f->get;
+   is( $len, 32, '$length of put from Future' );
 }
 
 # Single PUT from CODE/size pair
@@ -94,7 +100,8 @@ sub await_upload_and_respond
 
    await_upload_and_respond "three", "Content from a CODE ref";
 
-   $f->get;
+   my ( $etag, $len ) = $f->get;
+   is( $len, 23, '$length from put from CODE' );
 }
 
 # Single PUT with extra metadata
