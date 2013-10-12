@@ -208,6 +208,20 @@ METHODS
     reference, without the content string (as no content is returned to a
     `HEAD' request).
 
+  $s3->head_then_get_object( %args ) ==> ( $value_f, $response, $meta )
+    Performs a `GET' operation similar to `get_object', but allows access to
+    the metadata header before the body content is complete.
+
+    Takes the same named arguments as `get_object'.
+
+    The returned Future completes as soon as the metadata header has been
+    received and yields a second future (the body future), the
+    HTTP::Response and a hash reference containing the metadata fields. The
+    body future will eventually yield the actual body, along with another
+    copy of the response and metadata hash reference.
+
+     $value_f ==> $value, $response, $meta
+
   $s3->put_object( %args ) ==> ( $etag, $length )
     Sets a new value for a key in the bucket.
 

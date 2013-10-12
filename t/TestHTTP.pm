@@ -95,7 +95,17 @@ sub respond
    undef $pending_request;
    undef $pending_response;
 
-   $f->done( $response );
+   if( $pending_on_header ) {
+      my $header = $response->clone;
+      $header->content("");
+
+      my $on_chunk = $pending_on_header->( $header );
+      $on_chunk->( $response->content );
+      $f->done( $on_chunk->() );
+   }
+   else {
+      $f->done( $response );
+   }
 }
 
 sub respond_header

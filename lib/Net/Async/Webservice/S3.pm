@@ -9,14 +9,14 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.13';
+our $VERSION = '0.14';
 
 use Carp;
 
 use Digest::HMAC_SHA1;
 use Digest::MD5 qw( md5 );
 use Future 0.18; # ->wrap, bugfgix to fmap* on immediates
-use Future::Utils 0.16 qw( repeat );
+use Future::Utils 0.16 qw( repeat try_repeat );
 use HTTP::Date qw( time2str );
 use HTTP::Request;
 use IO::Async::Timer::Countdown;
@@ -376,7 +376,7 @@ sub _retry
    my $delay = 0.5;
 
    my $retries = $self->{max_retries};
-   repeat {
+   try_repeat {
       my ( $prev_f ) = @_;
 
       # Add a small delay after failure before retrying
@@ -560,12 +560,18 @@ reference is passed, the C<$value> string will be empty.
 
 =cut
 
-sub _get_object
+sub _head_then_get_object
 {
    my $self = shift;
    my %args = @_;
 
+   # TODO: This doesn't handle cancellation or retries
+   # But that said neither does the rest of this module, wrt: on_chunk streaming
+
    my $on_chunk = delete $args{on_chunk};
+
+   my $head_future = $self->loop->new_future;
+   my $value_future;
 
    my $request = $self->_make_request(
       method  => $args{method},
@@ -574,43 +580,48 @@ sub _get_object
       content => "",
    );
 
-   my $get_f;
-   if( $on_chunk ) {
-      $get_f = $self->_do_request( $request,
-         timeout       => $args{timeout},
-         stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
-         on_header => sub {
-            my ( $header ) = @_;
-            my $code = $header->code;
+   $self->_do_request( $request,
+      timeout       => $args{timeout},
+      stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
+      on_header => sub {
+         my ( $header ) = @_;
+         my $code = $header->code;
 
-            return sub {
-               return $on_chunk->( $header, @_ ) if @_ and $code == 200;
-               return $header; # with no body content
-            },
-         }
-      );
-   }
-   else {
-      $get_f = $self->_do_request( $request,
-         timeout       => $args{timeout},
-         stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
-      );
-   }
+         my %meta;
+         $header->scan( sub {
+            $_[0] =~ m/^X-Amz-Meta-(.*)$/i and $meta{$1} = $_[1];
+         });
 
-   return $get_f->then( sub {
-      my $resp = shift;
-      my %meta;
-      $resp->scan( sub {
-         $_[0] =~ m/^X-Amz-Meta-(.*)$/i and $meta{$1} = $_[1];
-      });
-      return Future->wrap( $resp->content, $resp, \%meta );
-   } );
+         $value_future = $head_future->new;
+         $head_future->done( $value_future, $header, \%meta );
+
+         return sub {
+            if( @_ and $code == 200 ) {
+               $on_chunk ? $on_chunk->( $header, @_ ) : $header->add_content( $_[0] );
+               return;
+            }
+            return $header; # with no body content
+         };
+      }
+   )->on_done( sub {
+      my ( $response ) = @_;
+      $value_future->done( $response->content, ( $head_future->get )[1,2] );
+   })->on_fail( sub {
+      ( $value_future || $head_future )->fail( @_ );
+   });
+
+   return $head_future;
 }
 
 sub get_object
 {
    my $self = shift;
-   $self->_retry( "_get_object", @_, method => "GET" );
+   my %args = @_;
+
+   $self->_retry( sub {
+      $self->_head_then_get_object( %args, method => "GET" )
+         ->then( sub { my ( $value_f ) = @_; $value_f }); # wait on the value
+   });
 }
 
 =head2 $s3->head_object( %args ) ==> ( $response, $meta )
@@ -630,10 +641,36 @@ request).
 sub head_object
 {
    my $self = shift;
-   $self->_retry( "_get_object", @_, method => "HEAD" )->then( sub {
-      shift; # no content
-      return Future->wrap( @_ );
+   my %args = @_;
+
+   $self->_retry( sub {
+      $self->_head_then_get_object( %args, method => "HEAD" )
+         ->then( sub { my ( $value_f ) = @_; $value_f }) # wait on the empty body
+         ->then( sub { shift; Future->wrap( @_ ) });     # remove (empty) value
    });
+}
+
+=head2 $s3->head_then_get_object( %args ) ==> ( $value_f, $response, $meta )
+
+Performs a C<GET> operation similar to C<get_object>, but allows access to the
+metadata header before the body content is complete.
+
+Takes the same named arguments as C<get_object>.
+
+The returned Future completes as soon as the metadata header has been received
+and yields a second future (the body future), the L<HTTP::Response> and a hash
+reference containing the metadata fields. The body future will eventually
+yield the actual body, along with another copy of the response and metadata
+hash reference.
+
+ $value_f ==> $value, $response, $meta
+
+=cut
+
+sub head_then_get_object
+{
+   my $self = shift;
+   $self->_retry( "_head_then_get_object", @_, method => "GET" );
 }
 
 =head2 $s3->put_object( %args ) ==> ( $etag, $length )

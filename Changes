@@ -1,5 +1,9 @@
 Revision history for Net-Async-Webservice-S3
 
+0.14    2013/10/12 03:09:11
+        [CHANGES]
+         * Added ->head_then_get_object method
+
 0.13    2013/09/26 21:02:25
         [CHANGES]
          * Added 'on_write' callback parameter to ->put_object
