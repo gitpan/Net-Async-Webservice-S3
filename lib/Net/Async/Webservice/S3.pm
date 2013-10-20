@@ -9,7 +9,7 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.14';
+our $VERSION = '0.15';
 
 use Carp;
 
@@ -77,7 +77,7 @@ sub _init
 
    $args->{http} ||= do {
       require Net::Async::HTTP;
-      Net::Async::HTTP->VERSION( '0.29' ); # on_body_write
+      Net::Async::HTTP->VERSION( '0.30' ); # ->fail result consistency
       my $http = Net::Async::HTTP->new;
       $self->add_child( $http );
       $http;
@@ -341,10 +341,8 @@ sub _do_request
          my $message = $resp->message;
          $message =~ s/\r$//; # HTTP::Response leaves the \r on this
 
-         return Future->new->die(
-            "$code $message on " . $request->method . " ". $request->uri->path,
-            $request,
-            $resp,
+         return Future->new->fail(
+            "$code $message", http => $resp, $request
          );
       }
 
@@ -387,8 +385,9 @@ sub _retry
       $delay_f->then( sub { $self->$method( @args ) } );
    } while => sub {
       my $f = shift;
-      my ( $failure, $request, $response ) = $f->failure or return 0; # success
-      return 0 if $response and $response->code =~ m/^4/; # don't retry HTTP 4xx
+      my ( $failure, $name, $response, $request ) = $f->failure or return 0; # success
+      return 0 if defined $name and $name eq "http" and
+                  $response and $response->code =~ m/^4/; # don't retry HTTP 4xx
       return --$retries;
    };
 }
@@ -565,7 +564,7 @@ sub _head_then_get_object
    my $self = shift;
    my %args = @_;
 
-   # TODO: This doesn't handle cancellation or retries
+   # TODO: This doesn't handle retries correctly
    # But that said neither does the rest of this module, wrt: on_chunk streaming
 
    my $on_chunk = delete $args{on_chunk};
@@ -587,6 +586,14 @@ sub _head_then_get_object
          my ( $header ) = @_;
          my $code = $header->code;
 
+         if( $head_future->is_cancelled ) {
+            # Just eat the body
+            return sub {
+               return if @_;
+               return $header;
+            };
+         }
+
          my %meta;
          $header->scan( sub {
             $_[0] =~ m/^X-Amz-Meta-(.*)$/i and $meta{$1} = $_[1];
@@ -605,6 +612,8 @@ sub _head_then_get_object
       }
    )->on_done( sub {
       my ( $response ) = @_;
+      return if $head_future->is_cancelled;
+
       $value_future->done( $response->content, ( $head_future->get )[1,2] );
    })->on_fail( sub {
       ( $value_future || $head_future )->fail( @_ );

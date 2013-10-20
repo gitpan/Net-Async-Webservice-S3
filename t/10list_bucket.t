@@ -287,7 +287,10 @@ EOF
    $f->get if $f->is_ready and $f->failure;
 
    is( $req->header( "X-NaHTTP-Timeout" ), 10, 'Request has timeout set for configured' );
-   $http->respond( 200, "OK", [] );
+   $http->respond( HTTP::Response->new( 200, "OK", [], <<'EOF' ) );
+<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult/>
+EOF
 
    $f = $s3->list_bucket(
       delimiter => "/",
@@ -298,7 +301,10 @@ EOF
    $f->get if $f->is_ready and $f->failure;
 
    is( $req->header( "X-NaHTTP-Timeout" ), 20, 'Request has timeout set for immediate' );
-   $http->respond( 200, "OK", [] );
+   $http->respond( HTTP::Response->new( 200, "OK", [], <<'EOF' ) );
+<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult/>
+EOF
 }
 
 done_testing;

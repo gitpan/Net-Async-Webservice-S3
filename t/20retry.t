@@ -77,9 +77,7 @@ EOF
       );
    }
 
-   like( scalar $f->failure,
-         qr(^500 Service Unavailable on GET / at ),
-         '$f fails eventually' );
+   is( scalar $f->failure, "500 Service Unavailable", '$f fails eventually' );
    is( $count, 3, 'Attempted 3 times total' );
 }
 
@@ -97,9 +95,7 @@ EOF
    );
 
    ok( $f->is_ready, '$f is ready after single HTTP 404 failure' );
-   like( scalar $f->failure,
-         qr(^404 Not Found on GET / at ),
-         '$f->failure for HTTP 404 failure' );
+   is( scalar $f->failure, "404 Not Found", '$f->failure for HTTP 404 failure' );
 }
 
 done_testing;

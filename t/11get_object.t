@@ -216,6 +216,29 @@ EOF
    is_deeply( $meta_2, $meta, '$meta again from value future' );
 }
 
+# head_then_get cancellation
+{
+   my $head_f = $s3->head_then_get_object(
+      bucket => "bucket",
+      key    => "one",
+   );
+
+   my $req;
+   wait_for { $req = $http->pending_request or $head_f->is_ready };
+   $head_f->get if $head_f->is_ready and $head_f->failure;
+
+   $head_f->cancel;
+
+   $http->respond_header(
+      HTTP::Response->new( 200, "OK", [
+         Content_Type => "text/plain",
+         'X-Amz-Meta-One' => "one",
+      ], "" )
+   );
+   $http->respond_more( "And now here is some content\n" );
+   $http->respond_done;
+}
+
 # Test that timeout argument is set only for direct argument
 {
    my $f;
