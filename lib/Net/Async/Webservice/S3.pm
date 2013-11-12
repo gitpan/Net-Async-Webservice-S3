@@ -9,7 +9,7 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.15';
+our $VERSION = '0.16';
 
 use Carp;
 
@@ -586,8 +586,10 @@ sub _head_then_get_object
          my ( $header ) = @_;
          my $code = $header->code;
 
-         if( $head_future->is_cancelled ) {
-            # Just eat the body
+         if( $head_future->is_cancelled or $code !~ m/^2/ ) {
+            # Just eat the body on cancellation or if it's not a 2xx
+            # For failures this will cause ->on_fail to occur and fail the
+            # $head_future
             return sub {
                return if @_;
                return $header;
@@ -616,7 +618,8 @@ sub _head_then_get_object
 
       $value_future->done( $response->content, ( $head_future->get )[1,2] );
    })->on_fail( sub {
-      ( $value_future || $head_future )->fail( @_ );
+      my $f = $value_future || $head_future;
+      $f->fail( @_ ) if !$f->is_cancelled;
    });
 
    return $head_future;

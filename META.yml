@@ -6,7 +6,7 @@ build_requires:
   IO::Async::Test: 0
   Test::More: 0.88
 dynamic_config: 1
-generated_by: 'Module::Build version 0.4007, CPAN::Meta::Converter version 2.132661'
+generated_by: 'Module::Build version 0.4007, CPAN::Meta::Converter version 2.132830'
 license: perl
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
@@ -15,7 +15,7 @@ name: Net-Async-Webservice-S3
 provides:
   Net::Async::Webservice::S3:
     file: lib/Net/Async/Webservice/S3.pm
-    version: 0.15
+    version: 0.16
 recommends:
   IO::Async::SSL: 0
 requires:
@@ -27,9 +27,9 @@ requires:
   IO::Async::Stream: 0.57
   IO::Async::Timer::Countdown: 0
   MIME::Base64: 0
-  Net::Async::HTTP: 0.29
+  Net::Async::HTTP: 0.30
   URI::Escape: 0
   XML::LibXML: 0
 resources:
   license: http://dev.perl.org/licenses/
-version: 0.15
+version: 0.16

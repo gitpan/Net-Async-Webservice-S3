@@ -1,5 +1,9 @@
 Revision history for Net-Async-Webservice-S3
 
+0.16    2013/11/12 00:48:18
+        [BUGFIXES]
+         * Bugfixes to head_then_get for non-200 responses, and cancellation
+
 0.15    2013/10/20 17:23:42
         [CHANGES]
          * Support ->head_then_get_object->cancel
