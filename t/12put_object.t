@@ -71,7 +71,7 @@ sub await_upload_and_respond
    is( $written, 11, 'on_write indicated 11 bytes total' );
 }
 
-# Single PUT from Future
+# Single PUT from Future->string
 {
    my $f = $s3->put_object(
       bucket => "bucket",
@@ -102,6 +102,25 @@ sub await_upload_and_respond
 
    my ( $etag, $len ) = $f->get;
    is( $len, 23, '$length from put from CODE' );
+}
+
+# Single PUT from Future->CODE/size pair
+{
+   my $f = $s3->put_object(
+      bucket => "bucket",
+      key    => "four",
+      value  => my $value_f = Future->new,
+   );
+   $f->on_fail( sub { die @_ } );
+
+   $loop->later( sub { $value_f->done(
+      sub { substr( "Content from a Future->CODE ref", $_[0], $_[1] ) }, 31
+   ) });
+
+   await_upload_and_respond "four", "Content from a Future->CODE ref";
+
+   my ( $etag, $len ) = $f->get;
+   is( $len, 31, '$length from put from Future->CODE' );
 }
 
 # Single PUT with extra metadata

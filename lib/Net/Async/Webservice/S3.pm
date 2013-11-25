@@ -9,17 +9,18 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.16';
+our $VERSION = '0.17';
 
 use Carp;
 
 use Digest::HMAC_SHA1;
 use Digest::MD5 qw( md5 );
 use Future 0.18; # ->wrap, bugfgix to fmap* on immediates
-use Future::Utils 0.16 qw( repeat try_repeat );
+use Future::Utils 0.16 qw( repeat try_repeat fmap1 );
 use HTTP::Date qw( time2str );
 use HTTP::Request;
 use IO::Async::Timer::Countdown;
+use List::Util qw( sum );
 use MIME::Base64 qw( encode_base64 );
 use Scalar::Util qw( blessed );
 use URI::Escape qw( uri_escape_utf8 );
@@ -184,6 +185,11 @@ pass a specific C<timeout> argument to those methods specifically.
 Optional. If configured, this is passed into the underlying
 C<Net::Async::HTTP> object and used for all content uploads and downloads.
 
+=item put_concurrent => INT
+
+Optional. If configured, gives a default value for the C<concurrent> parameter
+to C<put_object>.
+
 =back
 
 =cut
@@ -194,7 +200,8 @@ sub configure
    my %args = @_;
 
    foreach (qw( http access_key secret_key ssl bucket prefix host max_retries
-                list_max_keys part_size read_size timeout stall_timeout )) {
+                list_max_keys part_size read_size timeout stall_timeout
+                put_concurrent )) {
       exists $args{$_} and $self->{$_} = delete $args{$_};
    }
 
@@ -727,20 +734,30 @@ MD5sum check fails at the end of upload, it will be called again to retry the
 operation. The function must therefore be prepared to be invoked multiple
 times over its range.
 
+=item value => Future giving ( CODE, INT )
+
+Alternative form of C<value>, in which a C<Future> eventually yields the value
+generation C<CODE> reference and length. The C<CODE> reference is invoked as
+documented above.
+
+ ( $gen_value, $value_len ) = $value->get;
+
+ $chunk = $gen_value->( $pos, $len );
+
 =item gen_parts => CODE
 
 Alternative to C<value> in the case of larger values, and implies the use of
 multipart upload. Called repeatedly to generate successive parts of the
-upload. Each time C<gen_parts> is called it should return either a byte string
-containing the value for that part, a L<Future> which will eventually yield a
-byte string, or a 2-element list consisting of a CODE reference to the part's
-generator function and the length in bytes that it will eventually yield.
+upload. Each time C<gen_parts> is called it should return one of the forms of
+C<value> given above; namely, a byte string, a C<CODE> reference and size
+pair, or a C<Future> which will eventually yield either of these forms.
 
  ( $value ) = $gen_parts->()
 
- ( $value_f ) = $gen_parts->(); $value = $value_f->get
-
  ( $gen_value, $value_length ) = $gen_parts->()
+
+ ( $value_f ) = $gen_parts->(); $value = $value_f->get
+                                ( $gen_value, $value_length ) = $value_f->get
 
 Each case is analogous to the types that the C<value> key can take.
 
@@ -769,14 +786,21 @@ the individual part C<PUT> requests. Ignored for single-part uploads.
 =item on_write => CODE
 
 Optional. If provided, this code will be invoked after each successful
-C<syswrite> call on the underlying filehandle, indicating that the data was at
-least written as far as the kernel. It will be passed the total byte length
-that has been written for this call to C<put_object>.
+C<syswrite> call on the underlying filehandle when writing actual file
+content, indicating that the data was at least written as far as the
+kernel. It will be passed the total byte length that has been written for this
+call to C<put_object>. By the time the call has completed, this will be the
+total written length of the object.
 
- $on_write->( $written )
+ $on_write->( $bytes_written )
 
 Note that because of retries it is possible this count will decrease, if a
 part has to be retried due to e.g. a failing MD5 checksum.
+
+=item concurrent => INT
+
+Optional. If present, gives the number of parts to upload concurrently. If
+absent, a default of 1 will apply (i.e. no concurrency).
 
 =back
 
@@ -843,13 +867,14 @@ sub _put_object
 
    my $md5ctx = Digest::MD5->new;
    my $on_write = $args{on_write};
-   my $on_write_offset = $args{on_write_offset} // 0;
    my $pos = 0;
 
    # Make $content definitely a Future
    Future->wrap( delete $args{content} )->then( sub {
       my ( $content ) = @_;
-      my $content_length = ref $content ? $args{content_length} : length $content;
+      my $content_length = @_ > 1       ? $_[1]                 :
+                           ref $content ? $args{content_length} :
+                                          length $content;
       defined $content_length or die "TODO: referential content $content needs length";
 
       my $request = $self->_make_request(
@@ -866,9 +891,7 @@ sub _put_object
          stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
          expect_continue => 1,
          request_body => _md5sum_wrap( $content, $md5ctx, \$pos, $content_length, $self->{read_size} ),
-         $on_write ? ( on_body_write => sub {
-            $on_write->( $_[0] + $on_write_offset );
-         } ) : (),
+         ( $on_write ? ( on_body_write => $on_write ) : () ),
       );
    })->then( sub {
       my $resp = shift;
@@ -953,17 +976,19 @@ sub _put_object_multipart
 
    my $on_write = $args{on_write};
 
-   my @etags;
+   my $id;
+
+   my $written_committed = 0; # bytes written in committed parts
+   my %written_tentative;     # {$part_num} => bytes written so far in this part
 
    $self->_retry( "_initiate_multipart_upload",
       timeout => $args{meta_timeout} // $self->{timeout},
       %args
    )->then( sub {
-      my ( $id ) = @_;
+      ( $id ) = @_;
 
       my $part_num = 0;
-      my $total_len = 0;
-      repeat {
+      ( fmap1 {
          my ( $part_num, $content, %moreargs ) = @{$_[0]};
 
          $self->_retry( "_put_object",
@@ -975,33 +1000,36 @@ sub _put_object_multipart
                uploadId     => $id,
             },
             timeout      => $args{part_timeout},
-            on_write     => $on_write,
-            on_write_offset => $total_len,
+            ( $on_write ?
+               ( on_write => sub {
+                  $written_tentative{$part_num} = $_[0];
+                  $on_write->( $written_committed + sum values %written_tentative );
+               } ) : () ),
             %moreargs,
-         )->on_done( sub {
+         )->then( sub {
             my ( $etag, $len ) = @_;
-            push @etags, [ $part_num, $etag ];
-            $total_len += $len;
-         })
+            $written_committed += $len;
+            delete $written_tentative{$part_num};
+            return Future->wrap( [ $part_num, $etag ] );
+         });
       } generate => sub {
          my @content = $gen_parts->() or return;
          $part_num++;
          return [ $part_num, $content[0] ] if @content == 1;
          return [ $part_num, $content[0], content_length => $content[1] ] if @content == 2 and ref $content[0] eq "CODE";
-         die "Unsure what to do with gen_part result @content";
-      }, while => sub {
-         !$_[0]->failure;
-      }, otherwise => sub {
-         return Future->wrap( $id, \@etags, $total_len );
-      };
+         # It's possible that $content[0] is a 100MiByte string. Best not to
+         # interpolate that into $@ or we'll risk OOM
+         die "Unsure what to do with gen_part result " .
+            join( ", ", map { ref $_ ? $_ : "<".length($_)." bytes>" } @content );
+      }, concurrent => $args{concurrent} // $self->{put_concurrent} );
    })->then( sub {
-      my ( $id, $etags, $len ) = @_;
+      my @etags = @_;
 
       my $doc = XML::LibXML::Document->new( "1.0", "UTF-8" );
       $doc->addChild( my $root = $doc->createElement( "CompleteMultipartUpload" ) );
 
       #add content
-      foreach ( @$etags ) {
+      foreach ( @etags ) {
          my ( $part_num, $etag ) = @$_;
 
          $root->addChild( my $part = $doc->createElement('Part') );
@@ -1016,7 +1044,7 @@ sub _put_object_multipart
          timeout => $args{meta_timeout} // $self->{timeout},
       )->then( sub {
          my ( $etag ) = @_;
-         return Future->wrap( $etag, $len );
+         return Future->wrap( $etag, $written_committed );
       });
    });
 }
@@ -1144,7 +1172,7 @@ Parts of this code were paid for by
 
 =item *
 
-Socialflow L<http://www.socialflow.com>
+SocialFlow L<http://www.socialflow.com>
 
 =item *
 

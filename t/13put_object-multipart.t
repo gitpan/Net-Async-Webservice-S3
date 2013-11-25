@@ -82,7 +82,7 @@ sub await_multipart_part_and_respond
 
 sub await_multipart_complete_and_respond
 {
-   my ( $key ) = @_;
+   my ( $key, $want_etags ) = @_;
 
    my $req;
    wait_for { $req = $http->pending_request };
@@ -95,6 +95,14 @@ sub await_multipart_complete_and_respond
    is( $req->content_length, length( $req->content ), "Complete request has Content-Length" );
    like( $req->header( "Content-MD5" ), qr/^[0-9A-Z+\/]{22}==$/i,
       "Complete request has valid Base64-encoded MD5 sum" );
+
+   my $libxml = XML::LibXML->new;
+   my $xpc = XML::LibXML::XPathContext->new( $libxml->parse_string( $req->content ) );
+   my %got_etags;
+   foreach my $n ( $xpc->findnodes( "/CompleteMultipartUpload/Part" ) ) {
+      $got_etags{$xpc->findvalue( "./PartNumber", $n )} = $xpc->findvalue( "./ETag", $n );
+   }
+   is_deeply( \%got_etags, $want_etags, "Complete request body etags for $key" ) if $want_etags;
 
    $http->respond(
       HTTP::Response->new( 200, "OK", [
@@ -133,7 +141,11 @@ EOF
       await_multipart_part_and_respond "four", @$_;
    }
 
-   await_multipart_complete_and_respond "four";
+   await_multipart_complete_and_respond "four",
+      {
+         1 => '"797d5e4fc29677594bbc843c096073f6"',
+         2 => '"09c94e3dd1d6d832a44f6ef38505a2a9"',
+      };
 
    wait_for { $f->is_ready };
 
@@ -145,7 +157,7 @@ EOF
               [ 14, 14+15 ], 'on_write invoked on each chunk with total' );
 }
 
-# Multipart put from Future
+# Multipart put from Future->string
 {
    my @parts = (
       my $value1_f = Future->new,
@@ -168,7 +180,11 @@ EOF
       await_multipart_part_and_respond "five", @$_;
    }
 
-   await_multipart_complete_and_respond "five";
+   await_multipart_complete_and_respond "five",
+      {
+         1 => '"bd71e9fef5ab11c8b0c2da23f6d29c46"',
+         2 => '"6ab4f91cfb0588abbb269a65a838d54f"',
+      };
 
    wait_for { $f->is_ready };
 
@@ -196,12 +212,50 @@ EOF
       await_multipart_part_and_respond "six", @$_;
    }
 
-   await_multipart_complete_and_respond "six";
+   await_multipart_complete_and_respond "six",
+      {
+         1 => '"2d7db94bfed210fef0e7a7f89d79ecc3"',
+         2 => '"f554ebe9e8a03b051dc8ac36685f6d9f"',
+      };
 
    wait_for { $f->is_ready };
 
    my ( $etag, $len ) = $f->get;
    is( $len, 25, '$length from multipart put from CODE' );
+}
+
+# Multipart put from Future->CODE/size pair
+{
+   my @parts = (
+      my $value1_f = Future->new,
+      my $value2_f = Future->new,
+   );
+
+   my $f = $s3->put_object(
+      bucket => "bucket",
+      key    => "seven",
+      gen_parts => sub { return unless @parts; shift @parts },
+   );
+   $f->on_fail( sub { die @_ } );
+
+   $loop->later( sub { $value1_f->done(
+      sub { substr( "The content that comes ", $_[0], $_[1] ) }, 23 ) } );
+   $loop->later( sub { $value2_f->done(
+      sub { substr( "later from Future->CODE", $_[0], $_[1] ) }, 23 ) } );
+
+   await_multipart_initiate_and_respond "seven";
+
+   foreach ( [ 1, "The content that comes " ], [ 2, "later from Future->CODE" ] ) {
+      await_multipart_part_and_respond "seven", @$_;
+   }
+
+   await_multipart_complete_and_respond "seven",
+      {
+         1 => '"9cfc17e76eab703a4241df165e403504"',
+         2 => '"470f2cf68ea83fa4c497b8ca345f9661"',
+      };
+
+   wait_for { $f->is_ready };
 }
 
 # Multipart put from value automatically split
@@ -221,7 +275,11 @@ EOF
       await_multipart_part_and_respond "one.split", @$_;
    }
 
-   await_multipart_complete_and_respond "one.split";
+   await_multipart_complete_and_respond "one.split",
+      {
+         1 => '"5747c2b9ef2e762db6439e19c7dc08d5"',
+         2 => '"c8a4d06065b7628e62fa7fb48616e825"',
+      };
 
    wait_for { $f->is_ready };
 

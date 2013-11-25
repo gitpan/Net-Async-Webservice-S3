@@ -1,5 +1,13 @@
 Revision history for Net-Async-Webservice-S3
 
+0.17    2013/11/25 19:07:21
+        [CHANGES]
+         * Support multiple concurrent uploads of parts in ->put_object
+         * Allow (part) value to be a Future returning a CODE/size pair
+
+        [BUGFIXES]
+         * Avoid die()ing with an entire content string interpolated into $@
+
 0.16    2013/11/12 00:48:18
         [BUGFIXES]
          * Bugfixes to head_then_get for non-200 responses, and cancellation

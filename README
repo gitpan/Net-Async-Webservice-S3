@@ -114,6 +114,10 @@ PARAMETERS
             `Net::Async::HTTP' object and used for all content uploads and
             downloads.
 
+    put_concurrent => INT
+            Optional. If configured, gives a default value for the
+            `concurrent' parameter to `put_object'.
+
 METHODS
     The following methods all support the following common arguments:
 
@@ -258,21 +262,29 @@ METHODS
             function must therefore be prepared to be invoked multiple times
             over its range.
 
+    value => Future giving ( CODE, INT )
+            Alternative form of `value', in which a `Future' eventually
+            yields the value generation `CODE' reference and length. The
+            `CODE' reference is invoked as documented above.
+
+             ( $gen_value, $value_len ) = $value->get;
+
+             $chunk = $gen_value->( $pos, $len );
+
     gen_parts => CODE
             Alternative to `value' in the case of larger values, and implies
             the use of multipart upload. Called repeatedly to generate
             successive parts of the upload. Each time `gen_parts' is called
-            it should return either a byte string containing the value for
-            that part, a Future which will eventually yield a byte string,
-            or a 2-element list consisting of a CODE reference to the part's
-            generator function and the length in bytes that it will
-            eventually yield.
+            it should return one of the forms of `value' given above;
+            namely, a byte string, a `CODE' reference and size pair, or a
+            `Future' which will eventually yield either of these forms.
 
              ( $value ) = $gen_parts->()
 
-             ( $value_f ) = $gen_parts->(); $value = $value_f->get
-
              ( $gen_value, $value_length ) = $gen_parts->()
+
+             ( $value_f ) = $gen_parts->(); $value = $value_f->get
+                                            ( $gen_value, $value_length ) = $value_f->get
 
             Each case is analogous to the types that the `value' key can
             take.
@@ -299,16 +311,23 @@ METHODS
 
     on_write => CODE
             Optional. If provided, this code will be invoked after each
-            successful `syswrite' call on the underlying filehandle,
-            indicating that the data was at least written as far as the
-            kernel. It will be passed the total byte length that has been
-            written for this call to `put_object'.
+            successful `syswrite' call on the underlying filehandle when
+            writing actual file content, indicating that the data was at
+            least written as far as the kernel. It will be passed the total
+            byte length that has been written for this call to `put_object'.
+            By the time the call has completed, this will be the total
+            written length of the object.
 
-             $on_write->( $written )
+             $on_write->( $bytes_written )
 
             Note that because of retries it is possible this count will
             decrease, if a part has to be retried due to e.g. a failing MD5
             checksum.
+
+    concurrent => INT
+            Optional. If present, gives the number of parts to upload
+            concurrently. If absent, a default of 1 will apply (i.e. no
+            concurrency).
 
     The Future will return a string containing the S3 ETag of the newly-set
     key, and the length of the value in bytes.
@@ -337,7 +356,7 @@ METHODS
 SPONSORS
     Parts of this code were paid for by
 
-    * Socialflow http://www.socialflow.com
+    * SocialFlow http://www.socialflow.com
 
     * Shadowcat Systems http://www.shadow.cat
 
