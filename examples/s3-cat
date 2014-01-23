@@ -6,6 +6,11 @@ use warnings;
 use IO::Async::Loop;
 use Net::Async::Webservice::S3;
 
+use Getopt::Long;
+GetOptions(
+   'b|byte-range=s' => \my $BYTE_RANGE,
+) or exit 1;
+
 my $loop = IO::Async::Loop->new;
 
 my %config = do {
@@ -26,6 +31,7 @@ $loop->add( $s3 );
 
 $s3->get_object(
    key => shift @ARGV,
+   byte_range => $BYTE_RANGE,
    on_chunk => sub {
       my ( undef, $chunk ) = @_;
       print $chunk;

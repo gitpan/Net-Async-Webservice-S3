@@ -196,10 +196,35 @@ METHODS
             accumulated, and the final result of the Future will be an empty
             string.
 
+    byte_range => STRING
+            Optional. If supplied, is used to set the `Range' request header
+            with `bytes' as the units. This gives a range of bytes of the
+            object to fetch, rather than fetching the entire content. The
+            value must be as specified by HTTP/1.1; i.e. a comma-separated
+            list of ranges, where each range specifies a start and
+            optionally an inclusive stop byte index, separated by hypens.
+
+    if_match => STRING
+            Optional. If supplied, is used to set the `If-Match' request
+            header to the given string, which should be an entity etag. If
+            the requested object no longer has this etag, the request will
+            fail with an `http' failure whose response code is 412.
+
     The Future will return a byte string containing the key's value, the
     HTTP::Response that was received, and a hash reference containing any of
     the metadata fields, if found in the response. If an `on_chunk' code
     reference is passed, the `$value' string will be empty.
+
+    If the entire content of the object is requested (i.e. if `byte_range'
+    is not supplied) then stall timeout failures will be handled specially.
+    If a stall timeout happens while receiving the content, the request will
+    be retried using the `Range' header to resume from progress so far. This
+    will be repeated while every attempt still makes progress, and such
+    resumes will not be counted as part of the normal retry count. The
+    resume request also uses `If-Match' to ensure it only resumes the
+    resource with matching ETag. If a resume request fails for some reason
+    (either because the ETag no longer matches or something else) then this
+    error is ignored, and the original stall timeout failure is returned.
 
   $s3->head_object( %args ) ==> ( $response, $meta )
     Requests the value metadata of a key from a bucket. This is similar to

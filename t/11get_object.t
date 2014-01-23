@@ -86,6 +86,67 @@ EOF
    wait_for { $f->is_ready };
 }
 
+# Get byte range
+{
+   my $f = $s3->get_object(
+      bucket => "bucket",
+      key    => "one",
+      byte_range => "8-",
+   );
+
+   my $req;
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
+
+   is( $req->method,         "GET",                     'Request method' );
+   is( $req->uri->authority, "bucket.s3.amazonaws.com", 'Request URI authority' );
+   is( $req->uri->path,      "/one",                    'Request URI path' );
+   is( $req->header( "Range" ), "bytes=8-",             'Request Range header' );
+
+   $http->respond(
+      HTTP::Response->new( 206, "Partial Content", [
+         Content_Type => "text/plain",
+         Content_Range => "bytes 8-15/16",
+      ], <<'EOF' )
+the key
+EOF
+   );
+
+   wait_for { $f->is_ready };
+
+   my ( $value, $response ) = $f->get;
+   is( $value, "the key\n", '$value for ranged get' );
+   is( $response->content_type, "text/plain", '$response->content_type for ranged get' );
+}
+
+# Get with If-Match
+{
+   my $f = $s3->get_object(
+      bucket => "bucket",
+      key    => "one",
+      if_match => '"my-etag-here"',
+   );
+
+   my $req;
+   wait_for { $req = $http->pending_request or $f->is_ready };
+   $f->get if $f->is_ready and $f->failure;
+
+   is( $req->method,         "GET",                     'Request method' );
+   is( $req->uri->authority, "bucket.s3.amazonaws.com", 'Request URI authority' );
+   is( $req->uri->path,      "/one",                    'Request URI path' );
+   is( $req->header( "If-Match" ), '"my-etag-here"',    'Request If-Match header' );
+
+   $http->respond(
+      HTTP::Response->new( 412, "Precondition Failed", [], "" ),
+   );
+
+   wait_for { $f->is_ready };
+
+   ok( scalar $f->failure, '$f fails after 412 error' );
+   my ( $failure, $name, $resp ) = $f->failure;
+   is( $resp->code, 412, 'failure request has ->code 412' );
+}
+
 # Get with implied bucket and prefix
 {
    $s3->configure(

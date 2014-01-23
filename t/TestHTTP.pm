@@ -106,6 +106,15 @@ sub respond_done
    $pending->respond_done;
 }
 
+sub fail
+{
+   my $self = shift;
+
+   my $pending = delete $self->{pending};
+
+   $pending->fail( @_ );
+}
+
 package TestHTTP::Pending;
 
 sub new
@@ -193,6 +202,13 @@ sub respond_done
    my $self = shift;
 
    $self->response->done( $self->on_chunk->() );
+}
+
+sub fail
+{
+   my $self = shift;
+
+   $self->response->fail( @_ );
 }
 
 0x55AA;

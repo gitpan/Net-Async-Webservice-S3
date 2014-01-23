@@ -1,7 +1,7 @@
 #  You may distribute under the terms of either the GNU General Public License
 #  or the Artistic License (the same terms as Perl itself)
 #
-#  (C) Paul Evans, 2013 -- leonerd@leonerd.org.uk
+#  (C) Paul Evans, 2013-2014 -- leonerd@leonerd.org.uk
 
 package Net::Async::Webservice::S3;
 
@@ -9,13 +9,13 @@ use strict;
 use warnings;
 use base qw( IO::Async::Notifier );
 
-our $VERSION = '0.17';
+our $VERSION = '0.18';
 
 use Carp;
 
 use Digest::HMAC_SHA1;
 use Digest::MD5 qw( md5 );
-use Future 0.18; # ->wrap, bugfgix to fmap* on immediates
+use Future 0.21; # ->then_with_f
 use Future::Utils 0.16 qw( repeat try_repeat fmap1 );
 use HTTP::Date qw( time2str );
 use HTTP::Request;
@@ -78,7 +78,7 @@ sub _init
 
    $args->{http} ||= do {
       require Net::Async::HTTP;
-      Net::Async::HTTP->VERSION( '0.30' ); # ->fail result consistency
+      Net::Async::HTTP->VERSION( '0.33' ); # 'timeout' and 'stall_timeout' failures
       my $http = Net::Async::HTTP->new;
       $self->add_child( $http );
       $http;
@@ -339,9 +339,8 @@ sub _do_request
       request => $request,
       SSL => ( $request->uri->scheme eq "https" ),
       %args
-   )->and_then( sub {
-      my $f = shift;
-      my $resp = $f->get;
+   )->then_with_f( sub {
+      my ( $f, $resp ) = @_;
 
       my $code = $resp->code;
       if( $code !~ m/^2/ ) {
@@ -557,12 +556,38 @@ the value. Its return value is not important.
 If this is supplied then the key's value will not be accumulated, and the
 final result of the Future will be an empty string.
 
+=item byte_range => STRING
+
+Optional. If supplied, is used to set the C<Range> request header with
+C<bytes> as the units. This gives a range of bytes of the object to fetch,
+rather than fetching the entire content. The value must be as specified by
+HTTP/1.1; i.e. a comma-separated list of ranges, where each range specifies a
+start and optionally an inclusive stop byte index, separated by hypens.
+
+=item if_match => STRING
+
+Optional. If supplied, is used to set the C<If-Match> request header to the
+given string, which should be an entity etag. If the requested object no
+longer has this etag, the request will fail with an C<http> failure whose
+response code is 412.
+
 =back
 
 The Future will return a byte string containing the key's value, the
 L<HTTP::Response> that was received, and a hash reference containing any of
 the metadata fields, if found in the response. If an C<on_chunk> code
 reference is passed, the C<$value> string will be empty.
+
+If the entire content of the object is requested (i.e. if C<byte_range> is not
+supplied) then stall timeout failures will be handled specially. If a stall
+timeout happens while receiving the content, the request will be retried using
+the C<Range> header to resume from progress so far. This will be repeated
+while every attempt still makes progress, and such resumes will not be counted
+as part of the normal retry count. The resume request also uses C<If-Match> to
+ensure it only resumes the resource with matching ETag. If a resume request
+fails for some reason (either because the ETag no longer matches or something
+else) then this error is ignored, and the original stall timeout failure is
+returned.
 
 =cut
 
@@ -571,62 +596,115 @@ sub _head_then_get_object
    my $self = shift;
    my %args = @_;
 
+   my $if_match = $args{if_match};
+   my $byte_range = $args{byte_range};
+
    # TODO: This doesn't handle retries correctly
    # But that said neither does the rest of this module, wrt: on_chunk streaming
 
    my $on_chunk = delete $args{on_chunk};
 
+   my $header;
    my $head_future = $self->loop->new_future;
    my $value_future;
+   my $value_len = 0;
+   my $stall_failure_f;
 
-   my $request = $self->_make_request(
-      method  => $args{method},
-      bucket  => $args{bucket},
-      path    => $args{key},
-      content => "",
-   );
+   my $resume_on_stall = 1;
 
-   $self->_do_request( $request,
-      timeout       => $args{timeout},
-      stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
-      on_header => sub {
-         my ( $header ) = @_;
-         my $code = $header->code;
+   # TODO: Right now I can't be bothered to write the logic required to update
+   # the user-requested byte_range (which may in complex cases contain multiple
+   # discontinuous ranges) after a stall to resume it. This probably could be
+   # done at some stage.
+   $resume_on_stall = 0 if defined $byte_range;
 
-         if( $head_future->is_cancelled or $code !~ m/^2/ ) {
-            # Just eat the body on cancellation or if it's not a 2xx
-            # For failures this will cause ->on_fail to occur and fail the
-            # $head_future
+   ( try_repeat {
+      if( my $pos = $value_len ) {
+         $byte_range = "$pos-";
+      }
+
+      my $request = $self->_make_request(
+         method  => $args{method},
+         bucket  => $args{bucket},
+         path    => $args{key},
+         headers => {
+            ( defined $if_match   ? ( "If-Match" => $if_match )      : () ),
+            ( defined $byte_range ? ( Range => "bytes=$byte_range" ) : () ),
+         },
+         content => "",
+      );
+
+      $self->_do_request( $request,
+         timeout       => $args{timeout},
+         stall_timeout => $args{stall_timeout} // $self->{stall_timeout},
+         on_header => sub {
+            my ( $this_header ) = @_;
+            my $code = $this_header->code;
+
+            if( $head_future->is_cancelled or $code !~ m/^2/ ) {
+               # Just eat the body on cancellation or if it's not a 2xx
+               # For failures this will cause ->on_fail to occur and fail the
+               # $head_future
+               return sub {
+                  return if @_;
+                  return $this_header;
+               };
+            }
+
+            my %meta;
+            $this_header->scan( sub {
+               $_[0] =~ m/^X-Amz-Meta-(.*)$/i and $meta{$1} = $_[1];
+            });
+
+            if( !$value_future ) {
+               # First response
+               $header = $this_header;
+               # If we're going to retry this, ensure we only request this exact ETag
+               $if_match ||= $header->header( "ETag" );
+
+               $value_future = $head_future->new;
+               $head_future->done( $value_future, $header, \%meta );
+            }
+
             return sub {
-               return if @_;
-               return $header;
+               # Code here could be 200 (OK), 206 (Partial Content) or 204 (No Content)
+               return $this_header if $code == 204;
+
+               if( @_ ) {
+                  $value_len += length $_[0];
+                  if( $on_chunk ) {
+                     $on_chunk->( $header, @_ );
+                  }
+                  else {
+                     $header->add_content( $_[0] );
+                  }
+                  return;
+               }
+               return $header; # with no body content
             };
          }
+      );
+   } while => sub {
+      my ( $prev_f ) = @_;
+      # repeat while it keeps failing with a stall timeout
+      return 0 if !$resume_on_stall or !$prev_f->failure;
 
-         my %meta;
-         $header->scan( sub {
-            $_[0] =~ m/^X-Amz-Meta-(.*)$/i and $meta{$1} = $_[1];
-         });
+      my $op = ( $prev_f->failure )[1] // "";
+      return 0 if $op ne "stall_timeout";
 
-         $value_future = $head_future->new;
-         $head_future->done( $value_future, $header, \%meta );
-
-         return sub {
-            if( @_ and $code == 200 ) {
-               $on_chunk ? $on_chunk->( $header, @_ ) : $header->add_content( $_[0] );
-               return;
-            }
-            return $header; # with no body content
-         };
-      }
-   )->on_done( sub {
+      $stall_failure_f ||= $prev_f;
+      return 1;
+   } )->on_done( sub {
       my ( $response ) = @_;
       return if $head_future->is_cancelled;
 
       $value_future->done( $response->content, ( $head_future->get )[1,2] );
    })->on_fail( sub {
       my $f = $value_future || $head_future;
-      $f->fail( @_ ) if !$f->is_cancelled;
+      # If we have a $stall_failure_f it means we must have attempted a resume
+      # after a stall timeout, then failed for a different reason. Ignore that
+      # second reason and just pretend to the caller that we stalled.
+      $f->fail( $stall_failure_f ? $stall_failure_f->failure : @_ ) if !$f->is_cancelled;
    });
 
    return $head_future;

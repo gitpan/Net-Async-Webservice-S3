@@ -1,5 +1,11 @@
 Revision history for Net-Async-Webservice-S3
 
+0.18    2014/01/23 01:33:53
+        [CHANGES]
+         * Allow fetching byte ranges
+         * Wrap the If-Match HTTP header
+         * Repair stall_timeout by using a ranged GET
+
 0.17    2013/11/25 19:07:21
         [CHANGES]
          * Support multiple concurrent uploads of parts in ->put_object
